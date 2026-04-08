@@ -1,5 +1,7 @@
 import pytest
 
+from discuss_agent.config import ModelConfig
+
 
 @pytest.fixture
 def sample_config_dict():
@@ -18,7 +20,10 @@ def sample_config_dict():
             "convergence_prompt": "Judge convergence.",
             "summary_prompt": "Summarize the discussion.",
         },
-        "tools": ["tool_a", "tool_b"],
+        "tools": [
+            {"path": "tests.helpers.FakeToolA"},
+            {"path": "tests.helpers.FakeToolB"},
+        ],
         "context": {
             "research_dir": "~/ima-downloads/",
             "published_file": "PUBLISHED.md",

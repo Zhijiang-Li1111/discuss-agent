@@ -9,13 +9,12 @@ import re
 from dataclasses import asdict
 
 from agno.agent import Agent
-from agno.models.anthropic import Claude
 
-from discuss_agent.config import DiscussionConfig
+from discuss_agent.config import DiscussionConfig, build_claude
 from discuss_agent.context import ContextManager
 from discuss_agent.models import AgentUtterance, DiscussionResult, RoundRecord
 from discuss_agent.persistence import Archiver
-from discuss_agent.registry import load_plugins
+from discuss_agent.registry import import_from_path
 
 logger = logging.getLogger(__name__)
 
@@ -31,32 +30,77 @@ class DiscussionEngine:
         self._config = config
         self._archiver = Archiver()
 
-        # Load plugins and create tools
-        registry = load_plugins()
-        tools = [
-            registry.get_tool_class(name)(context=config.context)
-            for name in config.tools
-        ]
+        # Import global tool classes
+        global_tool_entries: list[tuple[str, type]] = []
+        for tc in config.tools:
+            cls = import_from_path(tc.path)
+            global_tool_entries.append((tc.path, cls))
+
+        # Load context builder from config
+        context_builder = None
+        if config.context_builder:
+            context_builder = import_from_path(config.context_builder)
 
         self._context_mgr = ContextManager(
-            config, context_builder=registry.get_context_builder()
+            config, context_builder=context_builder
         )
 
-        # Create N discussion agents
+        discussion_model = build_claude(config.model_config)
+
+        # Create N discussion agents with per-agent tool sets
         self._agents: list[Agent] = []
         for ac in config.agents:
+            # Compute per-agent tool set: global + extra - disabled
+            agent_tool_entries = list(global_tool_entries)
+
+            # Add extra tools
+            for tc in ac.extra_tools:
+                cls = import_from_path(tc.path)
+                agent_tool_entries.append((tc.path, cls))
+
+            # Deduplicate by path (keep first occurrence)
+            seen: set[str] = set()
+            deduped: list[tuple[str, type]] = []
+            for path, cls in agent_tool_entries:
+                if path not in seen:
+                    seen.add(path)
+                    deduped.append((path, cls))
+            agent_tool_entries = deduped
+
+            # Warn about disable_tools that don't match anything
+            available_paths = {p for p, _ in agent_tool_entries}
+            for dp in ac.disable_tools:
+                if dp not in available_paths:
+                    logger.warning(
+                        "Agent '%s': disable_tools path '%s' does not match "
+                        "any available tool; ignoring.",
+                        ac.name, dp,
+                    )
+
+            # Remove disabled tools
+            disabled = set(ac.disable_tools)
+            agent_tool_entries = [
+                (p, cls) for p, cls in agent_tool_entries if p not in disabled
+            ]
+
+            # Instantiate tools
+            tool_instances = [
+                cls(context=config.context) for _, cls in agent_tool_entries
+            ]
+
             agent = Agent(
                 name=ac.name,
-                model=Claude(id=config.model),
+                model=discussion_model,
                 system_message=ac.system_prompt,
-                tools=tools,
+                tools=tool_instances if tool_instances else None,
             )
             self._agents.append(agent)
 
         # Create Host agent (no tools)
+        host_model_config = config.host.resolve_model(config.model_config)
         self._host = Agent(
             name="Host",
-            model=Claude(id=config.model),
+            model=build_claude(host_model_config),
             system_message=config.host.convergence_prompt,
         )
 
@@ -196,9 +240,10 @@ class DiscussionEngine:
 
     async def _host_summarize(self, history: list[RoundRecord]) -> str:
         """Host generates final summary after convergence."""
+        host_model_config = self._config.host.resolve_model(self._config.model_config)
         summary_agent = Agent(
             name="Host-Summary",
-            model=Claude(id=self._config.model),
+            model=build_claude(host_model_config),
             system_message=self._config.host.summary_prompt,
         )
         history_text = self._format_history(history)

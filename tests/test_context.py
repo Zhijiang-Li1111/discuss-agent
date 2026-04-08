@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from discuss_agent.config import DiscussionConfig, AgentConfig, HostConfig
+from discuss_agent.config import DiscussionConfig, AgentConfig, HostConfig, ModelConfig
 from discuss_agent.models import RoundRecord, AgentUtterance
 from discuss_agent.context import ContextManager
 
@@ -19,7 +19,7 @@ def _make_config() -> DiscussionConfig:
     return DiscussionConfig(
         min_rounds=2,
         max_rounds=5,
-        model="claude-sonnet-4-20250514",
+        model_config=ModelConfig(model="claude-sonnet-4-20250514"),
         agents=[
             AgentConfig(name="A", system_prompt="prompt A"),
             AgentConfig(name="B", system_prompt="prompt B"),

@@ -52,11 +52,26 @@ class TestStartSession:
         assert config_path.exists(), "config.yaml should exist in session dir"
 
         loaded = yaml.safe_load(config_path.read_text())
+        # _mask_api_keys only modifies fields named 'api_key', so simple
+        # dataclass without api_key should match asdict directly.
         expected = asdict(cfg)
-        assert loaded == expected, (
-            f"config.yaml content should match dataclasses.asdict(config): "
-            f"got {loaded}, expected {expected}"
-        )
+        assert loaded == expected
+
+    def test_start_session_masks_api_key(self, tmp_path: Path):
+        """start_session must mask api_key values in the archived config.yaml."""
+        from discuss_agent.persistence import Archiver
+
+        @dataclass
+        class _ConfigWithKey:
+            model_config: dict
+
+        cfg = _ConfigWithKey(model_config={"model": "m", "api_key": "sk-real-secret"})
+        archiver = Archiver(base_dir=str(tmp_path))
+        session_dir = archiver.start_session(cfg)
+
+        config_path = Path(session_dir) / "config.yaml"
+        loaded = yaml.safe_load(config_path.read_text())
+        assert loaded["model_config"]["api_key"] == "***"
 
 
 # ---------------------------------------------------------------------------

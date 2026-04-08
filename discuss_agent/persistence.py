@@ -15,6 +15,15 @@ from pathlib import Path
 import yaml
 
 
+def _mask_api_keys(d: dict) -> None:
+    """Recursively mask any ``api_key`` values in a nested dict."""
+    for key, value in d.items():
+        if key == "api_key" and value is not None:
+            d[key] = "***"
+        elif isinstance(value, dict):
+            _mask_api_keys(value)
+
+
 class Archiver:
     """Persist discussion artefacts to disk.
 
@@ -59,8 +68,9 @@ class Archiver:
 
         os.makedirs(rounds_path, exist_ok=True)
 
-        # Persist config
+        # Persist config (with secrets masked)
         config_dict = asdict(config)
+        _mask_api_keys(config_dict)
         config_file = session_path / "config.yaml"
         config_file.write_text(yaml.dump(config_dict, allow_unicode=True))
 

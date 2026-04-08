@@ -79,11 +79,11 @@ class ContextManager:
     async def _compress_round(self, round_text: str) -> str:
         """Compress a single round's text using an LLM agent."""
         from agno.agent import Agent
-        from agno.models.anthropic import Claude
+        from discuss_agent.config import build_claude
 
         agent = Agent(
             name="Compressor",
-            model=Claude(id=self._config.model),
+            model=build_claude(self._config.model_config),
             system_message=(
                 "你是一个讨论记录压缩助手。"
                 "将以下讨论轮次的发言浓缩为一段简洁的摘要，"

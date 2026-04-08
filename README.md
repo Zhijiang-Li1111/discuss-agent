@@ -23,6 +23,10 @@ Create a YAML config file:
 # config.yaml
 discussion:
   model: "claude-sonnet-4-20250514"
+  api_key: env:ANTHROPIC_API_KEY       # reads from environment variable
+  # base_url: http://localhost:8080/v1 # optional — custom endpoint / proxy
+  # temperature: 0.7                   # optional — SDK default if omitted
+  # max_tokens: 8192                   # optional — SDK default if omitted
 
 agents:
   - name: "Optimist"
@@ -35,6 +39,8 @@ agents:
       Support your views with reasoning. Challenge optimistic views constructively.
 
 host:
+  # model: "claude-haiku-4-5-20251001" # optional — use a cheaper model for the host
+  # temperature: 0.3                    # optional — override per-field
   convergence_prompt: |
     You are the discussion moderator. Judge whether the discussion has converged.
     Return JSON: {"converged": bool, "reason": "...", "remaining_disputes": [...]}
@@ -59,12 +65,21 @@ Output is archived to `discussions/{timestamp}/` with config, rounds, and summar
 | Block | Field | Required | Default | Description |
 |-------|-------|----------|---------|-------------|
 | `discussion` | `model` | Yes | — | Claude model ID |
+| `discussion` | `api_key` | No | — | API key; supports `env:VAR_NAME` to read from env |
+| `discussion` | `base_url` | No | — | Custom API endpoint / proxy URL |
+| `discussion` | `temperature` | No | SDK default | Sampling temperature |
+| `discussion` | `max_tokens` | No | SDK default | Maximum output tokens |
 | `discussion` | `min_rounds` | No | 2 | Minimum rounds before convergence allowed |
 | `discussion` | `max_rounds` | No | 5 | Maximum rounds before forced exit |
 | `agents` | `name` | Yes | — | Agent display name |
 | `agents` | `system_prompt` | Yes | — | Agent system prompt |
 | `host` | `convergence_prompt` | Yes | — | Prompt for convergence judgment |
 | `host` | `summary_prompt` | Yes | — | Prompt for final summary generation |
+| `host` | `model` | No | inherits | Override model for host agent |
+| `host` | `api_key` | No | inherits | Override API key for host; supports `env:` prefix |
+| `host` | `base_url` | No | inherits | Override base URL for host |
+| `host` | `temperature` | No | inherits | Override temperature for host |
+| `host` | `max_tokens` | No | inherits | Override max_tokens for host |
 | `tools` | — | Yes | — | List of tool names (resolved via plugin registry) |
 | `context` | — | No | `{}` | Arbitrary dict passed to the context builder |
 
