@@ -2,34 +2,35 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 
 from discuss_agent.config import DiscussionConfig
 from discuss_agent.models import RoundRecord
-from discuss_agent.tools.research_list import ResearchListTools
-from discuss_agent.tools.published import PublishedTools
-from discuss_agent.tools.trending import TrendingTools
+
+logger = logging.getLogger(__name__)
 
 
 class ContextManager:
     """Manages context assembly and compression for the discussion framework."""
 
-    def __init__(self, config: DiscussionConfig):
+    def __init__(
+        self,
+        config: DiscussionConfig,
+        context_builder: Callable[[dict], Awaitable[str]] | None = None,
+    ):
         self._config = config
-        self._research_list = ResearchListTools(research_dir=config.context.research_dir)
-        self._published = PublishedTools()
-        self._trending = TrendingTools()
+        self._context_builder = context_builder
 
     async def build_initial_context(self) -> str:
-        """Build Round 0 shared context: published history + research titles + trending."""
-        published = self._published.get_published(self._config.context.published_file)
-        research = self._research_list.list_research(days=self._config.context.research_days)
-        trending = self._trending.get_trending()
-        return (
-            f"## 已发布历史\n{published}\n\n"
-            f"## 近期研报标题\n{research}\n\n"
-            f"## 当前热榜\n{trending}"
+        """Build Round 0 shared context by delegating to the registered builder."""
+        if self._context_builder:
+            return await self._context_builder(self._config.context)
+        logger.warning(
+            "No context builder registered. Starting discussion with empty context."
         )
+        return ""
 
     async def compress(
         self, history: list[RoundRecord], current_round: int

@@ -6,7 +6,6 @@ import pytest
 from discuss_agent.config import (
     AgentConfig,
     ConfigLoader,
-    ContextConfig,
     DiscussionConfig,
     HostConfig,
 )
@@ -41,14 +40,14 @@ class TestConfigLoaderFullParse:
 
     def test_tools(self, sample_config_yaml):
         cfg = ConfigLoader.load(sample_config_yaml)
-        assert cfg.tools == ["research_list", "research_content", "trending", "published"]
+        assert cfg.tools == ["tool_a", "tool_b"]
 
     def test_context(self, sample_config_yaml):
         cfg = ConfigLoader.load(sample_config_yaml)
-        assert isinstance(cfg.context, ContextConfig)
-        assert cfg.context.research_dir == "~/ima-downloads/"
-        assert cfg.context.published_file == "PUBLISHED.md"
-        assert cfg.context.research_days == 2
+        assert isinstance(cfg.context, dict)
+        assert cfg.context["research_dir"] == "~/ima-downloads/"
+        assert cfg.context["published_file"] == "PUBLISHED.md"
+        assert cfg.context["research_days"] == 2
 
 
 class TestConfigLoaderDefaults:
@@ -96,14 +95,14 @@ class TestConfigLoaderValidation:
         with pytest.raises(ValueError, match="tools"):
             ConfigLoader.load(str(path))
 
-    def test_missing_context_raises(self, tmp_path, sample_config_dict):
+    def test_missing_context_defaults_empty(self, tmp_path, sample_config_dict):
         d = dict(sample_config_dict)
         del d["context"]
-        path = tmp_path / "bad.yaml"
+        path = tmp_path / "no_ctx.yaml"
         path.write_text(yaml.dump(d, allow_unicode=True))
 
-        with pytest.raises(ValueError, match="context"):
-            ConfigLoader.load(str(path))
+        cfg = ConfigLoader.load(str(path))
+        assert cfg.context == {}
 
     def test_missing_model_raises(self, tmp_path, sample_config_dict):
         d = dict(sample_config_dict)
@@ -113,3 +112,12 @@ class TestConfigLoaderValidation:
 
         with pytest.raises(ValueError, match="model"):
             ConfigLoader.load(str(path))
+
+    def test_context_arbitrary_keys(self, tmp_path, sample_config_dict):
+        d = dict(sample_config_dict)
+        d["context"] = {"foo": "bar", "num": 42}
+        path = tmp_path / "custom_ctx.yaml"
+        path.write_text(yaml.dump(d, allow_unicode=True))
+
+        cfg = ConfigLoader.load(str(path))
+        assert cfg.context == {"foo": "bar", "num": 42}

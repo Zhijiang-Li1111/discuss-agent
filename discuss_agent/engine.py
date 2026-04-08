@@ -15,7 +15,7 @@ from discuss_agent.config import DiscussionConfig
 from discuss_agent.context import ContextManager
 from discuss_agent.models import AgentUtterance, DiscussionResult, RoundRecord
 from discuss_agent.persistence import Archiver
-from discuss_agent.tools import get_tools
+from discuss_agent.registry import load_plugins
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +30,19 @@ class DiscussionEngine:
     def __init__(self, config: DiscussionConfig):
         self._config = config
         self._archiver = Archiver()
-        self._context_mgr = ContextManager(config)
+
+        # Load plugins and create tools
+        registry = load_plugins()
+        tools = [
+            registry.get_tool_class(name)(context=config.context)
+            for name in config.tools
+        ]
+
+        self._context_mgr = ContextManager(
+            config, context_builder=registry.get_context_builder()
+        )
 
         # Create N discussion agents
-        tools = get_tools(config.tools, config)
         self._agents: list[Agent] = []
         for ac in config.agents:
             agent = Agent(

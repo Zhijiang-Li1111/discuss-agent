@@ -1,11 +1,11 @@
-"""Tests for the ContextManager (Tasks 11–12)."""
+"""Tests for the ContextManager."""
 
 from __future__ import annotations
 
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import AsyncMock, patch
 
-from discuss_agent.config import DiscussionConfig, AgentConfig, HostConfig, ContextConfig
+from discuss_agent.config import DiscussionConfig, AgentConfig, HostConfig
 from discuss_agent.models import RoundRecord, AgentUtterance
 from discuss_agent.context import ContextManager
 
@@ -28,12 +28,8 @@ def _make_config() -> DiscussionConfig:
             convergence_prompt="converge",
             summary_prompt="summarize",
         ),
-        tools=["research_list", "published", "trending"],
-        context=ContextConfig(
-            research_dir="~/ima-downloads/",
-            published_file="PUBLISHED.md",
-            research_days=2,
-        ),
+        tools=[],
+        context={"research_dir": "~/ima-downloads/", "published_file": "PUBLISHED.md", "research_days": 2},
     )
 
 
@@ -48,59 +44,48 @@ def _make_round(round_num: int, content_size: int = 100) -> RoundRecord:
 
 
 # ===========================================================================
-# Task 11 — build_initial_context
+# build_initial_context — pluggable context builder
 # ===========================================================================
 
 
 class TestBuildInitialContext:
-    """Tests for ContextManager.build_initial_context."""
+    """Tests for ContextManager.build_initial_context with pluggable builder."""
 
     @pytest.mark.asyncio
-    async def test_build_initial_context_contains_sections(self):
-        """Mock the three tool methods and verify the result contains all sections."""
+    async def test_calls_context_builder(self):
+        """When a context_builder is provided, it should be called with config.context."""
+        config = _make_config()
+        mock_builder = AsyncMock(return_value="built context")
+        mgr = ContextManager(config, context_builder=mock_builder)
+
+        result = await mgr.build_initial_context()
+
+        mock_builder.assert_called_once_with(config.context)
+        assert result == "built context"
+
+    @pytest.mark.asyncio
+    async def test_no_builder_returns_empty(self):
+        """When no context_builder is provided, should return empty string."""
+        config = _make_config()
+        mgr = ContextManager(config, context_builder=None)
+
+        result = await mgr.build_initial_context()
+
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_no_builder_default(self):
+        """context_builder defaults to None when not provided."""
         config = _make_config()
         mgr = ContextManager(config)
 
-        with (
-            patch.object(mgr._published, "get_published", return_value="pub-data-here"),
-            patch.object(mgr._research_list, "list_research", return_value="research-titles-here"),
-            patch.object(mgr._trending, "get_trending", return_value="trending-data-here"),
-        ):
-            result = await mgr.build_initial_context()
+        result = await mgr.build_initial_context()
 
-        # All three section headers must be present
-        assert "已发布历史" in result
-        assert "近期研报标题" in result
-        assert "当前热榜" in result
-
-        # The mocked content must appear in the output
-        assert "pub-data-here" in result
-        assert "research-titles-here" in result
-        assert "trending-data-here" in result
-
-    @pytest.mark.asyncio
-    async def test_initial_context_metadata_only(self):
-        """The returned context should contain title-level data, not PDF content."""
-        config = _make_config()
-        mgr = ContextManager(config)
-
-        title_data = "20260407-GoldmanSachs-半导体行业深度"
-        with (
-            patch.object(mgr._published, "get_published", return_value="some published"),
-            patch.object(mgr._research_list, "list_research", return_value=title_data),
-            patch.object(mgr._trending, "get_trending", return_value="热榜条目"),
-        ):
-            result = await mgr.build_initial_context()
-
-        # Should contain the title-level string we returned
-        assert title_data in result
-        # Should NOT contain any raw PDF content markers
-        assert "%PDF" not in result
-        assert "stream\n" not in result
+        assert result == ""
 
 
 # ===========================================================================
-# Task 12 — compress
+# compress
 # ===========================================================================
 
 

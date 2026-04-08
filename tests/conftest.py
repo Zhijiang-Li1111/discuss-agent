@@ -18,7 +18,7 @@ def sample_config_dict():
             "convergence_prompt": "Judge convergence.",
             "summary_prompt": "Summarize the discussion.",
         },
-        "tools": ["research_list", "research_content", "trending", "published"],
+        "tools": ["tool_a", "tool_b"],
         "context": {
             "research_dir": "~/ima-downloads/",
             "published_file": "PUBLISHED.md",

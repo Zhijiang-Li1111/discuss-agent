@@ -9,7 +9,6 @@ import pytest
 
 from discuss_agent.config import (
     AgentConfig,
-    ContextConfig,
     DiscussionConfig,
     HostConfig,
 )
@@ -26,6 +25,14 @@ class MockRunOutput:
 
     def __init__(self, content: str | None):
         self.content = content
+
+
+def _mock_load_plugins():
+    """Return a mock load_plugins that provides an empty PluginRegistry."""
+    mock_registry = MagicMock()
+    mock_registry.get_tool_class = MagicMock()
+    mock_registry.get_context_builder.return_value = None
+    return MagicMock(return_value=mock_registry)
 
 
 def _make_config(
@@ -47,28 +54,28 @@ def _make_config(
             summary_prompt="Summarize the discussion.",
         ),
         tools=[],
-        context=ContextConfig(
-            research_dir="~/research",
-            published_file="PUBLISHED.md",
-            research_days=2,
-        ),
+        context={},
     )
 
 
 # ---------------------------------------------------------------------------
-# Task 13 — Agent Creation
+# Agent Creation
 # ---------------------------------------------------------------------------
 
 
 class TestAgentCreation:
     """Verify that DiscussionEngine creates the correct agents."""
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
-    def test_creates_agents_from_config(self, MockAgent, MockCtxMgr, mock_get_tools):
+    def test_creates_agents_from_config(self, MockAgent, MockCtxMgr, mock_load):
         """Engine should create len(config.agents) discussion agents plus 1 host."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(
+            get_context_builder=MagicMock(return_value=None),
+        )
 
         config = _make_config(num_agents=3)
         engine = DiscussionEngine(config)
@@ -89,19 +96,21 @@ class TestAgentCreation:
 
 
 # ---------------------------------------------------------------------------
-# Task 14 — Express (Parallel)
+# Express (Parallel)
 # ---------------------------------------------------------------------------
 
 
 class TestExpress:
     """Verify the _express step."""
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @pytest.mark.asyncio
-    async def test_express_returns_utterances(self, MockCtxMgr, mock_get_tools):
+    async def test_express_returns_utterances(self, MockCtxMgr, mock_load):
         """_express should return AgentUtterance for each agent that succeeds."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         # Create distinct mock agents so each has its own .name
         mock_agents = [MagicMock(name="Agent-A"), MagicMock(name="Agent-B")]
@@ -126,13 +135,15 @@ class TestExpress:
         names = {u.agent_name for u in result}
         assert names == {"Agent-A", "Agent-B"}
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
-    async def test_express_prompt_includes_history(self, MockAgent, MockCtxMgr, mock_get_tools):
+    async def test_express_prompt_includes_history(self, MockAgent, MockCtxMgr, mock_load):
         """The prompt passed to agents should include the formatted history."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         config = _make_config(num_agents=1)
         engine = DiscussionEngine(config)
@@ -163,19 +174,21 @@ class TestExpress:
 
 
 # ---------------------------------------------------------------------------
-# Task 15 — Challenge (Parallel)
+# Challenge (Parallel)
 # ---------------------------------------------------------------------------
 
 
 class TestChallenge:
     """Verify the _challenge step."""
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @pytest.mark.asyncio
-    async def test_challenge_excludes_own_expression(self, MockCtxMgr, mock_get_tools):
+    async def test_challenge_excludes_own_expression(self, MockCtxMgr, mock_load):
         """Each agent's challenge prompt must exclude its own expression."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         mock_agents = [MagicMock(), MagicMock()]
         mock_agents[0].name = "Agent-A"
@@ -215,20 +228,22 @@ class TestChallenge:
 
 
 # ---------------------------------------------------------------------------
-# Task 16 — Host Judgment
+# Host Judgment
 # ---------------------------------------------------------------------------
 
 
 class TestHostJudgment:
     """Verify host convergence judgment parsing."""
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
-    async def test_host_judge_parses_json(self, MockAgent, MockCtxMgr, mock_get_tools):
+    async def test_host_judge_parses_json(self, MockAgent, MockCtxMgr, mock_load):
         """Host judge should parse valid JSON with converged=true."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         config = _make_config()
         engine = DiscussionEngine(config)
@@ -250,15 +265,17 @@ class TestHostJudgment:
         assert result["reason"] == "All agree"
         assert result["remaining_disputes"] == []
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
     async def test_host_judge_malformed_defaults_not_converged(
-        self, MockAgent, MockCtxMgr, mock_get_tools
+        self, MockAgent, MockCtxMgr, mock_load
     ):
         """Malformed host response should default to converged=False."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         config = _make_config()
         engine = DiscussionEngine(config)
@@ -280,20 +297,22 @@ class TestHostJudgment:
 
 
 # ---------------------------------------------------------------------------
-# Task 17 — Host Summary
+# Host Summary
 # ---------------------------------------------------------------------------
 
 
 class TestHostSummary:
     """Verify host summary generation."""
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
-    async def test_host_summarize_returns_content(self, MockAgent, MockCtxMgr, mock_get_tools):
+    async def test_host_summarize_returns_content(self, MockAgent, MockCtxMgr, mock_load):
         """_host_summarize should return the content from the summary agent."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         config = _make_config()
         engine = DiscussionEngine(config)
@@ -321,21 +340,23 @@ class TestHostSummary:
 
 
 # ---------------------------------------------------------------------------
-# Task 18 — Error Handling
+# Error Handling
 # ---------------------------------------------------------------------------
 
 
 class TestErrorHandling:
     """Verify retry and error handling in agent calls."""
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @pytest.mark.asyncio
     async def test_single_agent_failure_retries_and_skips(
-        self, MockCtxMgr, mock_get_tools
+        self, MockCtxMgr, mock_load
     ):
         """If one agent fails, _express should still return utterances from the other."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         mock_agents = [MagicMock(), MagicMock()]
         mock_agents[0].name = "Agent-A"
@@ -359,12 +380,14 @@ class TestErrorHandling:
         assert len(result) == 1
         assert result[0].agent_name == "Agent-B"
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @pytest.mark.asyncio
-    async def test_all_agents_fail_raises(self, MockCtxMgr, mock_get_tools):
+    async def test_all_agents_fail_raises(self, MockCtxMgr, mock_load):
         """If ALL agents fail, _express should raise AllAgentsFailedError."""
         from discuss_agent.engine import DiscussionEngine, AllAgentsFailedError
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         mock_agents = [MagicMock(), MagicMock()]
         mock_agents[0].name = "Agent-A"
@@ -385,7 +408,7 @@ class TestErrorHandling:
 
 
 # ---------------------------------------------------------------------------
-# Task 19 — Main Loop
+# Main Loop
 # ---------------------------------------------------------------------------
 
 
@@ -393,15 +416,7 @@ class TestMainLoop:
     """Verify the full discussion loop."""
 
     def _patch_engine(self, engine, judgments):
-        """Set up standard mocks for the main loop.
-
-        Parameters
-        ----------
-        engine : DiscussionEngine
-            The engine instance to patch.
-        judgments : list[dict]
-            One judgment per round. Must have len >= max_rounds or until convergence.
-        """
+        """Set up standard mocks for the main loop."""
         round_counter = {"n": 0}
 
         async def mock_express(round_num, context, history):
@@ -431,22 +446,22 @@ class TestMainLoop:
         engine._host_judge = AsyncMock(side_effect=mock_host_judge)
         engine._host_summarize = AsyncMock(side_effect=mock_host_summarize)
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
-    async def test_full_loop_converges(self, MockAgent, MockCtxMgr, mock_get_tools):
+    async def test_full_loop_converges(self, MockAgent, MockCtxMgr, mock_load):
         """When host converges at round 2 (>= min_rounds), result should show converged."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         config = _make_config(min_rounds=2, max_rounds=5)
         engine = DiscussionEngine(config)
 
-        # Mock archiver
         engine._archiver = MagicMock()
         engine._archiver.start_session.return_value = "/tmp/session"
 
-        # Mock context manager
         engine._context_mgr.build_initial_context = AsyncMock(return_value="Initial context")
         engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
 
@@ -464,13 +479,15 @@ class TestMainLoop:
         assert result.summary == "Final summary content"
         assert result.remaining_disputes == []
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
-    async def test_min_rounds_enforced(self, MockAgent, MockCtxMgr, mock_get_tools):
+    async def test_min_rounds_enforced(self, MockAgent, MockCtxMgr, mock_load):
         """Host converges at round 1 but min_rounds=2; should continue to round 2."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         config = _make_config(min_rounds=2, max_rounds=5)
         engine = DiscussionEngine(config)
@@ -488,17 +505,18 @@ class TestMainLoop:
 
         result = await engine.run()
 
-        # Should NOT converge at round 1 because min_rounds=2
         assert result.converged is True
         assert result.rounds_completed == 2  # not 1
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
-    async def test_max_rounds_enforced(self, MockAgent, MockCtxMgr, mock_get_tools):
+    async def test_max_rounds_enforced(self, MockAgent, MockCtxMgr, mock_load):
         """Host never converges; should stop at max_rounds with converged=False."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         config = _make_config(min_rounds=1, max_rounds=3)
         engine = DiscussionEngine(config)
@@ -522,13 +540,15 @@ class TestMainLoop:
         assert result.summary is None
         assert "X" in result.remaining_disputes
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
-    async def test_error_termination(self, MockAgent, MockCtxMgr, mock_get_tools):
+    async def test_error_termination(self, MockAgent, MockCtxMgr, mock_load):
         """AllAgentsFailedError at round 2 => terminated_by_error, round 1 archived."""
         from discuss_agent.engine import DiscussionEngine, AllAgentsFailedError
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         config = _make_config(min_rounds=1, max_rounds=5)
         engine = DiscussionEngine(config)
@@ -559,28 +579,28 @@ class TestMainLoop:
         result = await engine.run()
 
         assert result.terminated_by_error is True
-        assert result.rounds_completed == 1  # round 1 completed, round 2 failed
+        assert result.rounds_completed == 1
         assert result.converged is False
 
-        # Verify round 1 was archived (save_round called for express, challenge, host)
         save_round_calls = engine._archiver.save_round.call_args_list
         phases_r1 = [c.args[1] for c in save_round_calls if c.args[0] == 1]
         assert "express" in phases_r1
         assert "challenge" in phases_r1
         assert "host" in phases_r1
 
-        # Verify error log was saved (AC-8.3)
         engine._archiver.save_error_log.assert_called_once()
         error_msg = engine._archiver.save_error_log.call_args.args[0]
         assert "All agents failed" in error_msg
 
-    @patch("discuss_agent.engine.get_tools", return_value=[])
+    @patch("discuss_agent.engine.load_plugins")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
-    async def test_three_save_round_calls_per_round(self, MockAgent, MockCtxMgr, mock_get_tools):
+    async def test_three_save_round_calls_per_round(self, MockAgent, MockCtxMgr, mock_load):
         """Each round should produce exactly 3 save_round calls: express, challenge, host."""
         from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
 
         config = _make_config(min_rounds=1, max_rounds=2)
         engine = DiscussionEngine(config)
@@ -599,12 +619,38 @@ class TestMainLoop:
         result = await engine.run()
 
         save_round_calls = engine._archiver.save_round.call_args_list
-        # 2 rounds x 3 phases = 6 calls
         assert len(save_round_calls) == 6
 
-        # Check per-round phases
         for round_num in [1, 2]:
             phases = [c.args[1] for c in save_round_calls if c.args[0] == round_num]
             assert phases == ["express", "challenge", "host"], (
                 f"Round {round_num} should have phases [express, challenge, host], got {phases}"
             )
+
+    @patch("discuss_agent.engine.load_plugins")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_no_plugins_empty_tools_runs(self, MockAgent, MockCtxMgr, mock_load):
+        """AC-2.5: Engine runs normally with no plugins and empty tools list."""
+        from discuss_agent.engine import DiscussionEngine
+
+        mock_load.return_value = MagicMock(get_context_builder=MagicMock(return_value=None))
+
+        config = _make_config(min_rounds=1, max_rounds=1)
+        engine = DiscussionEngine(config)
+
+        engine._archiver = MagicMock()
+        engine._archiver.start_session.return_value = "/tmp/session"
+        engine._context_mgr.build_initial_context = AsyncMock(return_value="")
+        engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
+
+        judgments = [
+            {"converged": True, "reason": "Quick agreement", "remaining_disputes": []},
+        ]
+        self._patch_engine(engine, judgments)
+
+        result = await engine.run()
+
+        assert result.converged is True
+        assert result.rounds_completed == 1

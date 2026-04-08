@@ -21,13 +21,6 @@ class HostConfig:
 
 
 @dataclass
-class ContextConfig:
-    research_dir: str
-    published_file: str
-    research_days: int
-
-
-@dataclass
 class DiscussionConfig:
     min_rounds: int
     max_rounds: int
@@ -35,10 +28,10 @@ class DiscussionConfig:
     agents: list[AgentConfig]
     host: HostConfig
     tools: list[str]
-    context: ContextConfig
+    context: dict
 
 
-_REQUIRED_TOP_KEYS = ("agents", "host", "tools", "context")
+_REQUIRED_TOP_KEYS = ("agents", "host", "tools")
 
 
 class ConfigLoader:
@@ -88,13 +81,8 @@ class ConfigLoader:
             summary_prompt=host_raw["summary_prompt"],
         )
 
-        # --- context ---
-        ctx_raw = raw["context"]
-        context = ContextConfig(
-            research_dir=ctx_raw["research_dir"],
-            published_file=ctx_raw["published_file"],
-            research_days=ctx_raw["research_days"],
-        )
+        # --- context (optional, opaque dict passed to context builder) ---
+        context: dict = raw.get("context", {}) or {}
 
         # --- tools ---
         tools: list[str] = raw["tools"]
