@@ -158,7 +158,7 @@ class ConfigLoader:
         model_config = ModelConfig(
             model=disc["model"],
             api_key=resolve_env(disc.get("api_key")),
-            base_url=disc.get("base_url"),
+            base_url=resolve_env(disc.get("base_url")),
             temperature=disc.get("temperature"),
             max_tokens=disc.get("max_tokens"),
         )
@@ -188,7 +188,7 @@ class ConfigLoader:
             summary_prompt=host_raw["summary_prompt"],
             model=host_raw.get("model"),
             api_key=resolve_env(host_raw.get("api_key")),
-            base_url=host_raw.get("base_url"),
+            base_url=resolve_env(host_raw.get("base_url")),
             temperature=host_raw.get("temperature"),
             max_tokens=host_raw.get("max_tokens"),
         )
