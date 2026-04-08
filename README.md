@@ -6,8 +6,9 @@ Generic multi-agent adversarial discussion framework.
 - **Cross-challenge**: each agent critiques others' views
 - **Host convergence judgment** with structured JSON output
 - **YAML-driven** configuration (agents, host, tools, context)
+- **Per-agent tools**: global tools inherited by all agents, with per-agent extra/disable
 - **Automatic session archiving** (config, rounds, summary)
-- **Plugin system** via Python entry_points for custom tools and context
+- **Runtime tool loading** via Python dotted paths — no `pip install` needed
 
 ## Install
 
@@ -28,6 +29,11 @@ discussion:
   # temperature: 0.7                   # optional — SDK default if omitted
   # max_tokens: 8192                   # optional — SDK default if omitted
 
+tools:
+  - path: my_package.tools.MyTool
+
+context_builder: my_package.context.build_context
+
 agents:
   - name: "Optimist"
     system_prompt: |
@@ -37,6 +43,10 @@ agents:
     system_prompt: |
       You are a skeptic. You question assumptions and look for risks.
       Support your views with reasoning. Challenge optimistic views constructively.
+    extra_tools:
+      - path: my_package.tools.ExtraTool
+    disable_tools:
+      - my_package.tools.MyTool
 
 host:
   # model: "claude-haiku-4-5-20251001" # optional — use a cheaper model for the host
@@ -48,7 +58,8 @@ host:
     Summarize the discussion. Include key agreements, remaining disagreements,
     and a balanced conclusion.
 
-tools: []
+context:
+  api_url: "https://example.com"
 ```
 
 Run:
@@ -71,8 +82,12 @@ Output is archived to `discussions/{timestamp}/` with config, rounds, and summar
 | `discussion` | `max_tokens` | No | SDK default | Maximum output tokens |
 | `discussion` | `min_rounds` | No | 2 | Minimum rounds before convergence allowed |
 | `discussion` | `max_rounds` | No | 5 | Maximum rounds before forced exit |
+| `tools` | `path` | Yes | — | Python dotted path to a Toolkit subclass |
+| `context_builder` | — | No | — | Python dotted path to an async context builder function |
 | `agents` | `name` | Yes | — | Agent display name |
 | `agents` | `system_prompt` | Yes | — | Agent system prompt |
+| `agents` | `extra_tools` | No | `[]` | Additional tools for this agent (`[{path: "..."}]`) |
+| `agents` | `disable_tools` | No | `[]` | Dotted paths of global tools to disable for this agent |
 | `host` | `convergence_prompt` | Yes | — | Prompt for convergence judgment |
 | `host` | `summary_prompt` | Yes | — | Prompt for final summary generation |
 | `host` | `model` | No | inherits | Override model for host agent |
@@ -80,10 +95,9 @@ Output is archived to `discussions/{timestamp}/` with config, rounds, and summar
 | `host` | `base_url` | No | inherits | Override base URL for host |
 | `host` | `temperature` | No | inherits | Override temperature for host |
 | `host` | `max_tokens` | No | inherits | Override max_tokens for host |
-| `tools` | — | Yes | — | List of tool names (resolved via plugin registry) |
 | `context` | — | No | `{}` | Arbitrary dict passed to the context builder |
 
-## Plugin Development
+## Tool Development
 
 ### 1. Create tools
 
@@ -114,44 +128,33 @@ async def build_context(context: dict) -> str:
     return f"## Background Data\n{data}"
 ```
 
-### 3. Write the register function
+### 3. Reference in YAML
 
-```python
-from discuss_agent.registry import PluginRegistry
+Point to your tool classes and context builder via Python dotted paths. No `pip install` or entry_points needed — just ensure the module is importable:
 
-def register(registry: PluginRegistry) -> None:
-    registry.register_tool("my_tool", MyTool)
-    registry.register_context_builder(build_context)
+```yaml
+tools:
+  - path: my_package.tools.MyTool
+
+context_builder: my_package.context.build_context
 ```
-
-### 4. Declare the entry point
-
-In your package's `pyproject.toml`:
-
-```toml
-[project.entry-points."discuss_agent.plugins"]
-my_plugin = "my_package:register"
-```
-
-### 5. Install
-
-```bash
-pip install -e .
-python -m discuss_agent config.yaml
-```
-
-The framework discovers your plugin automatically via `entry_points`.
 
 ## API Reference
 
-### PluginRegistry
+### import_from_path
 
 ```python
-class PluginRegistry:
-    def register_tool(self, name: str, tool_class: type) -> None: ...
-    def register_context_builder(self, builder: Callable[[dict], Awaitable[str]]) -> None: ...
-    def get_tool_class(self, name: str) -> type: ...          # raises ValueError if not found
-    def get_context_builder(self) -> Callable | None: ...
+from discuss_agent import import_from_path
+
+cls = import_from_path("my_package.tools.MyTool")  # returns the class
+```
+
+### ToolConfig
+
+```python
+from discuss_agent import ToolConfig
+
+tc = ToolConfig(path="my_package.tools.MyTool")
 ```
 
 ### DiscussionEngine
