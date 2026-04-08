@@ -1,0 +1,23 @@
+[project]
+name = "discuss-agent"
+version = "0.1.0"
+description = "Generic multi-agent adversarial discussion framework"
+requires-python = ">=3.12"
+dependencies = [
+    "agno",
+    "pyyaml",
+    "anthropic",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
