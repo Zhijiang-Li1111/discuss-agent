@@ -2,13 +2,66 @@
 
 Generic multi-agent adversarial discussion framework.
 
-- **N agents** express opinions in parallel
-- **Cross-challenge**: each agent critiques others' views
+- **N agents** express opinions in parallel, then cross-challenge each other
 - **Host convergence judgment** with structured JSON output
-- **YAML-driven** configuration (agents, host, tools, context)
-- **Per-agent tools**: global tools inherited by all agents, with per-agent extra/disable
-- **Automatic session archiving** (config, rounds, summary)
-- **Runtime tool loading** via Python dotted paths — no `pip install` needed
+- **YAML-driven** configuration — agents, host, tools, context, model settings
+- **Full LLM API config** — `api_key` (with `env:` prefix), `base_url`, `temperature`, `max_tokens`; host can override model settings independently
+- **Per-agent tools** — global tools inherited by all agents, with per-agent `extra_tools` / `disable_tools`
+- **Runtime tool loading** via Python dotted paths — no `pip install` or entry_points needed
+- **Automatic session archiving** with secret redaction (config, rounds, summary)
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph Config ["YAML Config"]
+        direction TB
+        C1["discussion: model, api_key, base_url, ..."]
+        C2["agents: name, system_prompt, extra_tools"]
+        C3["host: prompts, model override"]
+        C4["tools: dotted paths"]
+    end
+
+    Config --> Engine
+
+    subgraph Engine ["DiscussionEngine"]
+        direction TB
+        CTX["Round 0: Build shared context"]
+        CTX --> Loop
+
+        subgraph Loop ["Round 1 … N"]
+            direction TB
+            E["1. Express — all agents speak in parallel"]
+            CH["2. Challenge — each agent critiques others"]
+            HJ["3. Host Judge — converged?"]
+            E --> CH --> HJ
+        end
+
+        HJ -- "Yes + round >= min_rounds" --> SUM["Host Summary"]
+        HJ -- "No + round < max_rounds" --> Loop
+        HJ -- "round >= max_rounds" --> EXIT["Exit (not converged)"]
+    end
+
+    subgraph Agents ["Participants"]
+        direction LR
+        A1["Agent 1"]
+        A2["Agent 2"]
+        AN["Agent N"]
+        HOST["Host Agent"]
+    end
+
+    subgraph Infra ["Infrastructure"]
+        direction LR
+        TOOLS["Pluggable Tools\n(Agno Toolkit)"]
+        ARCHIVE["Archiver\ndiscussions/{timestamp}/"]
+        COMPRESS["Context Compressor\n(LLM-based, >120K tokens)"]
+    end
+
+    Loop --> Agents
+    Agents --> TOOLS
+    Loop --> ARCHIVE
+    Loop --> COMPRESS
+```
 
 ## Install
 
