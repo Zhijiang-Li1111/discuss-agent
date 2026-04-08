@@ -85,9 +85,15 @@ class ContextManager:
             name="Compressor",
             model=build_claude(self._config.model_config),
             system_message=(
-                "你是一个讨论记录压缩助手。"
-                "将以下讨论轮次的发言浓缩为一段简洁的摘要，"
-                "保留关键论点、证据和分歧。不要添加新信息。"
+                "你是一个讨论记录压缩助手。你的任务是将一轮讨论的完整发言"
+                "浓缩为一段简洁的摘要，帮助后续讨论者快速了解此前的要点。\n\n"
+                "压缩时请保留：\n"
+                "- 每位讨论者的核心论点和明确立场\n"
+                "- 关键数据、具体来源引用和事实性证据\n"
+                "- 各方之间的分歧点及其理由\n"
+                "- 任何立场转变及其原因\n\n"
+                "去掉重复论述、客套用语和过渡性表达。"
+                "不要添加讨论中未出现的信息或评价。"
             ),
         )
         result = await agent.arun(input=round_text, stream=False)

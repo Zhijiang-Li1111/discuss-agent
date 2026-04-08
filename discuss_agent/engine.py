@@ -152,7 +152,17 @@ class DiscussionEngine:
     ) -> list[AgentUtterance]:
         """All agents express opinions in parallel."""
         history_text = self._format_history(history)
-        prompt = f"{context}\n\n{history_text}\n\n第{round_num}轮：请分享你的分析和观点。"
+        prompt = (
+            f"{context}\n\n"
+            f"{history_text}\n\n"
+            f"这是第{round_num}轮讨论。请基于上述背景资料和此前的讨论记录，"
+            f"提出你的分析和观点。\n\n"
+            f"好的发言应该做到：\n"
+            f"- 引用具体的数据、来源或事实来支撑你的论点\n"
+            f"- 提出明确的立场，而不是面面俱到的概述\n"
+            f"- 如果前几轮讨论中有你认同或反对的观点，直接回应它们\n\n"
+            f"如果你需要查阅更多资料来支撑你的观点，请使用可用的工具。"
+        )
 
         async def call_agent(agent: Agent) -> AgentUtterance | None:
             content = await self._safe_agent_call(agent, prompt)
@@ -184,7 +194,14 @@ class DiscussionEngine:
             )
             prompt = (
                 f"以下是其他讨论者在第{round_num}轮的观点：\n\n"
-                f"{others_text}\n\n请审视上述观点，提出质疑或补充。"
+                f"{others_text}\n\n"
+                f"请仔细审视上述观点，找出其中的薄弱环节并提出有针对性的质疑。"
+                f"有价值的质疑应该做到：\n"
+                f"- 指出论证中的逻辑漏洞、数据缺失或隐含假设\n"
+                f"- 提供反面证据或替代解释\n"
+                f"- 追问关键细节：具体数据来源、时间窗口、适用范围\n\n"
+                f"如果对方的某个论点确实有说服力，也可以明确认可并说明原因——"
+                f"承认好的论据比勉强反驳更有建设性。"
             )
             content = await self._safe_agent_call(agent, prompt)
             if content:
@@ -206,8 +223,16 @@ class DiscussionEngine:
         """Host judges convergence. Returns parsed JSON or default not-converged."""
         history_text = self._format_history(history)
         prompt = (
-            f"以下是讨论记录：\n\n{history_text}\n\n"
-            f"请判断讨论是否收敛。返回JSON格式。"
+            f"以下是到目前为止的完整讨论记录：\n\n{history_text}\n\n"
+            f"请判断这场讨论是否已经收敛。收敛意味着各方在核心问题上已经达成基本共识，"
+            f"最近一轮不再出现实质性的新挑战或新论据。\n\n"
+            f"判断时请注意：\n"
+            f"- 重复已有论点或仅做措辞调整不算新质疑\n"
+            f"- 各方观点不必完全一致，只要核心分歧已被充分讨论即可\n"
+            f"- 一方明确接受对方论据并调整立场是收敛的强信号\n\n"
+            f"请返回以下 JSON 格式：\n"
+            f'{{"converged": true/false, "reason": "你的判断理由", '
+            f'"remaining_disputes": ["尚未解决的分歧点，如果有"]}}'
         )
 
         for attempt in range(2):
@@ -247,7 +272,16 @@ class DiscussionEngine:
             system_message=self._config.host.summary_prompt,
         )
         history_text = self._format_history(history)
-        prompt = f"以下是完整的讨论记录：\n\n{history_text}\n\n请生成最终选题报告。"
+        prompt = (
+            f"以下是完整的讨论记录：\n\n{history_text}\n\n"
+            f"讨论已经结束。请基于上述记录生成一份结构化的总结报告。\n\n"
+            f"你的总结应当包含：\n"
+            f"- 核心结论：讨论各方最终达成的共识是什么\n"
+            f"- 关键论据：支撑结论的主要证据和推理链条\n"
+            f"- 多元视角：不同讨论者带来的差异化观点和贡献\n"
+            f"- 未决事项：如果存在未完全解决的分歧，如实记录\n\n"
+            f"总结应当忠于讨论内容，不添加讨论中未出现的信息。"
+        )
         result = await summary_agent.arun(input=prompt, stream=False)
         return result.content
 
