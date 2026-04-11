@@ -16,7 +16,20 @@ def main() -> None:
         description="Run a multi-agent adversarial discussion."
     )
     parser.add_argument("config", help="Path to YAML configuration file")
+    parser.add_argument(
+        "--resume",
+        help="Path to existing discussion archive to resume from",
+    )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        help="Number of additional rounds to run (used with --resume)",
+    )
     args = parser.parse_args()
+
+    if args.resume and args.rounds is None:
+        print("Error: --rounds is required when using --resume", file=sys.stderr)
+        sys.exit(1)
 
     if not os.path.isfile(args.config):
         print(f"Error: config file not found: {args.config}", file=sys.stderr)
@@ -24,7 +37,7 @@ def main() -> None:
 
     config = ConfigLoader.load(args.config)
     engine = DiscussionEngine(config)
-    result = asyncio.run(engine.run())
+    result = asyncio.run(engine.run(resume_path=args.resume, extra_rounds=args.rounds))
 
     print(f"Discussion archived at: {result.archive_path}")
     if result.converged:

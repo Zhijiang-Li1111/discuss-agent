@@ -308,16 +308,39 @@ class DiscussionEngine:
     # Main loop
     # ------------------------------------------------------------------
 
-    async def run(self) -> DiscussionResult:
-        """Run the full discussion loop."""
-        session_path = self._archiver.start_session(self._config)
-        context = await self._context_mgr.build_initial_context()
-        self._archiver.save_context(context)
+    async def run(
+        self,
+        resume_path: str | None = None,
+        extra_rounds: int | None = None,
+    ) -> DiscussionResult:
+        """Run the full discussion loop.
 
-        history: list[RoundRecord] = []
+        Parameters
+        ----------
+        resume_path:
+            Path to an existing archive directory to resume from.
+            When set, history and context are loaded from disk instead
+            of being generated fresh.
+        extra_rounds:
+            Number of additional rounds to run after the loaded history.
+            Required when *resume_path* is provided.
+        """
+        if resume_path is not None:
+            session_path = self._archiver.resume_session(resume_path)
+            history = self._archiver.load_history(resume_path)
+            context = self._archiver.load_context(resume_path)
+            start_round = len(history) + 1
+            max_rounds = len(history) + (extra_rounds or 0)
+        else:
+            session_path = self._archiver.start_session(self._config)
+            context = await self._context_mgr.build_initial_context()
+            self._archiver.save_context(context)
+            history = []
+            start_round = 1
+            max_rounds = self._config.max_rounds
 
         try:
-            for round_num in range(1, self._config.max_rounds + 1):
+            for round_num in range(start_round, max_rounds + 1):
                 # Step 1: Express
                 expressions = await self._express(round_num, context, history)
                 self._archiver.save_round(
@@ -372,7 +395,7 @@ class DiscussionEngine:
             last_judgment = history[-1].host_judgment if history else {}
             return DiscussionResult(
                 converged=False,
-                rounds_completed=self._config.max_rounds,
+                rounds_completed=max_rounds,
                 archive_path=session_path,
                 summary=None,
                 remaining_disputes=(

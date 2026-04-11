@@ -152,6 +152,19 @@ python -m discuss_agent config.yaml
 
 Output is archived to `discussions/{timestamp}/` with config, rounds, and summary.
 
+### Resume a Discussion
+
+Resume from a previous discussion archive and run additional rounds:
+
+```bash
+python3 -m discuss_agent config.yaml --resume discussions/2026-04-11_2159 --rounds 2
+```
+
+- Loads conversation history from the archive directory
+- Context is loaded from the archive (not regenerated)
+- New rounds are appended to the same archive directory
+- Round numbering continues from where it left off
+
 ## Configuration
 
 | Block | Field | Required | Default | Description |
