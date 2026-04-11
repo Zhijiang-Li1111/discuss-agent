@@ -201,6 +201,23 @@ class TestContextBuilder:
         assert cfg.context_builder is None
 
 
+class TestLimitation:
+    """Test limitation top-level field parsing."""
+
+    def test_limitation_parsed(self, tmp_path, sample_config_dict):
+        d = dict(sample_config_dict)
+        d["limitation"] = "仅讨论技术可行性"
+        path = tmp_path / "with_limitation.yaml"
+        path.write_text(yaml.dump(d, allow_unicode=True))
+
+        cfg = ConfigLoader.load(str(path))
+        assert cfg.limitation == "仅讨论技术可行性"
+
+    def test_limitation_defaults_none(self, sample_config_yaml):
+        cfg = ConfigLoader.load(sample_config_yaml)
+        assert cfg.limitation is None
+
+
 # ---------------------------------------------------------------------------
 # resolve_env (AC-02..04, AC-18)
 # ---------------------------------------------------------------------------

@@ -93,6 +93,9 @@ class DiscussionEngine:
                 model=discussion_model,
                 system_message=ac.system_prompt,
                 tools=tool_instances if tool_instances else None,
+                # Prevent unbounded memory growth from accumulated tool results
+                store_tool_messages=False,
+                add_history_to_context=False,
             )
             self._agents.append(agent)
 
@@ -102,6 +105,8 @@ class DiscussionEngine:
             name="Host",
             model=build_claude(host_model_config),
             system_message=config.host.convergence_prompt,
+            store_tool_messages=False,
+            add_history_to_context=False,
         )
 
     # ------------------------------------------------------------------
@@ -152,7 +157,13 @@ class DiscussionEngine:
     ) -> list[AgentUtterance]:
         """All agents express opinions in parallel."""
         history_text = self._format_history(history)
+
+        limitation_prefix = ""
+        if self._config.limitation:
+            limitation_prefix = f"⚠️ 本次讨论范围仅限于：{self._config.limitation}\n\n"
+
         prompt = (
+            f"{limitation_prefix}"
             f"{context}\n\n"
             f"{history_text}\n\n"
             f"这是第{round_num}轮讨论。请基于上述背景资料和此前的讨论记录，"
@@ -192,7 +203,13 @@ class DiscussionEngine:
             others_text = "\n\n".join(
                 f"[{e.agent_name}] {e.content}" for e in others
             )
+
+            limitation_prefix = ""
+            if self._config.limitation:
+                limitation_prefix = f"⚠️ 本次讨论范围仅限于：{self._config.limitation}\n\n"
+
             prompt = (
+                f"{limitation_prefix}"
                 f"以下是其他讨论者在第{round_num}轮的观点：\n\n"
                 f"{others_text}\n\n"
                 f"请仔细审视上述观点，找出其中的薄弱环节并提出有针对性的质疑。"
@@ -270,6 +287,8 @@ class DiscussionEngine:
             name="Host-Summary",
             model=build_claude(host_model_config),
             system_message=self._config.host.summary_prompt,
+            store_tool_messages=False,
+            add_history_to_context=False,
         )
         history_text = self._format_history(history)
         prompt = (

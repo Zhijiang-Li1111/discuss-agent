@@ -37,6 +37,7 @@ def _make_config(
     tools: list[ToolConfig] | None = None,
     context_builder: str | None = None,
     agent_overrides: dict | None = None,
+    limitation: str | None = None,
 ) -> DiscussionConfig:
     agents = []
     for i in range(num_agents):
@@ -62,6 +63,7 @@ def _make_config(
         tools=tools or [],
         context={},
         context_builder=context_builder,
+        limitation=limitation,
     )
 
 
@@ -713,3 +715,112 @@ class TestMainLoop:
 
         assert result.converged is True
         assert result.rounds_completed == 1
+
+
+# ---------------------------------------------------------------------------
+# Limitation Injection
+# ---------------------------------------------------------------------------
+
+
+class TestLimitation:
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_express_includes_limitation(self, MockAgent, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = _make_config(num_agents=1, limitation="仅讨论技术可行性")
+        engine = DiscussionEngine(config)
+        engine._agents[0].name = "Agent-A"
+
+        captured_prompts = []
+
+        async def mock_safe_call(agent, prompt):
+            captured_prompts.append(prompt)
+            return "Response"
+
+        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
+            await engine._express(1, "context-text", [])
+
+        assert "⚠️ 本次讨论范围仅限于：仅讨论技术可行性" in captured_prompts[0]
+        assert captured_prompts[0].startswith("⚠️ 本次讨论范围仅限于：")
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @pytest.mark.asyncio
+    async def test_challenge_includes_limitation(self, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        mock_agents = [MagicMock(), MagicMock()]
+        mock_agents[0].name = "Agent-A"
+        mock_agents[1].name = "Agent-B"
+        mock_host = MagicMock()
+        mock_host.name = "Host"
+
+        with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
+            config = _make_config(num_agents=2, limitation="仅讨论技术可行性")
+            engine = DiscussionEngine(config)
+
+        expressions = [
+            AgentUtterance("Agent-A", "Opinion from A"),
+            AgentUtterance("Agent-B", "Opinion from B"),
+        ]
+
+        captured = {}
+
+        async def mock_safe_call(agent, prompt):
+            captured[agent.name] = prompt
+            return f"Challenge from {agent.name}"
+
+        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
+            await engine._challenge(1, expressions)
+
+        for name in ("Agent-A", "Agent-B"):
+            assert "⚠️ 本次讨论范围仅限于：仅讨论技术可行性" in captured[name]
+            assert captured[name].startswith("⚠️ 本次讨论范围仅限于：")
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_express_no_limitation_when_none(self, MockAgent, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = _make_config(num_agents=1, limitation=None)
+        engine = DiscussionEngine(config)
+        engine._agents[0].name = "Agent-A"
+
+        captured_prompts = []
+
+        async def mock_safe_call(agent, prompt):
+            captured_prompts.append(prompt)
+            return "Response"
+
+        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
+            await engine._express(1, "context-text", [])
+
+        assert "⚠️" not in captured_prompts[0]
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_express_no_limitation_when_empty_string(self, MockAgent, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = _make_config(num_agents=1, limitation="")
+        engine = DiscussionEngine(config)
+        engine._agents[0].name = "Agent-A"
+
+        captured_prompts = []
+
+        async def mock_safe_call(agent, prompt):
+            captured_prompts.append(prompt)
+            return "Response"
+
+        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
+            await engine._express(1, "context-text", [])
+
+        assert "⚠️" not in captured_prompts[0]

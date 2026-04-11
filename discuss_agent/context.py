@@ -81,6 +81,9 @@ class ContextManager:
         from agno.agent import Agent
         from discuss_agent.config import build_claude
 
+        # Create a fresh agent each time to avoid session accumulation.
+        # This is intentional: compression is infrequent and the agent is
+        # lightweight (no tools, no history).
         agent = Agent(
             name="Compressor",
             model=build_claude(self._config.model_config),
@@ -95,6 +98,8 @@ class ContextManager:
                 "去掉重复论述、客套用语和过渡性表达。"
                 "不要添加讨论中未出现的信息或评价。"
             ),
+            store_tool_messages=False,
+            add_history_to_context=False,
         )
         result = await agent.arun(input=round_text, stream=False)
         return result.content

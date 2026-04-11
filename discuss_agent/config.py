@@ -68,8 +68,13 @@ def build_claude(model_config: ModelConfig) -> Claude:
         kwargs["temperature"] = model_config.temperature
     if model_config.max_tokens is not None:
         kwargs["max_tokens"] = model_config.max_tokens
+    client_params: dict[str, Any] = {}
     if model_config.base_url is not None:
-        kwargs["client_params"] = {"base_url": model_config.base_url}
+        client_params["base_url"] = model_config.base_url
+    # Long timeout for large-context requests (research reports can be 40k+ chars)
+    client_params["timeout"] = 600.0
+    if client_params:
+        kwargs["client_params"] = client_params
     return Claude(**kwargs)
 
 
@@ -119,6 +124,7 @@ class DiscussionConfig:
     tools: list[ToolConfig]
     context: dict
     context_builder: str | None = None
+    limitation: str | None = None
 
 
 _REQUIRED_TOP_KEYS = ("agents", "host", "tools")
@@ -199,6 +205,9 @@ class ConfigLoader:
         # --- context_builder (optional top-level dotted path) ---
         context_builder: str | None = raw.get("context_builder")
 
+        # --- limitation (optional top-level string) ---
+        limitation: str | None = raw.get("limitation")
+
         # --- tools (list of {path: "..."} dicts) ---
         raw_tools = raw["tools"]
         tools: list[ToolConfig] = []
@@ -219,4 +228,5 @@ class ConfigLoader:
             tools=tools,
             context=context,
             context_builder=context_builder,
+            limitation=limitation,
         )
