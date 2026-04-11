@@ -8,51 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from discuss_agent.models import AgentUtterance, DiscussionResult, RoundRecord
-from discuss_agent.config import (
-    AgentConfig,
-    DiscussionConfig,
-    HostConfig,
-    ModelConfig,
-    ToolConfig,
-)
+from discuss_agent.models import AgentUtterance, DiscussionResult
+
+from tests.shared import make_config, patch_engine
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-class MockRunOutput:
-    def __init__(self, content: str | None):
-        self.content = content
-
-
-def _make_config(
-    min_rounds: int = 2,
-    max_rounds: int = 5,
-    num_agents: int = 2,
-) -> DiscussionConfig:
-    agents = []
-    for i in range(num_agents):
-        agents.append(
-            AgentConfig(
-                name=f"Agent-{chr(65 + i)}",
-                system_prompt=f"You are agent {chr(65 + i)}.",
-            )
-        )
-    return DiscussionConfig(
-        min_rounds=min_rounds,
-        max_rounds=max_rounds,
-        model_config=ModelConfig(model="claude-sonnet-4-20250514"),
-        agents=agents,
-        host=HostConfig(
-            convergence_prompt="Judge convergence.",
-            summary_prompt="Summarize the discussion.",
-        ),
-        tools=[],
-        context={},
-    )
 
 
 def _create_archive(
@@ -153,7 +116,8 @@ class TestLoadHistory:
 
         archive = _create_archive(tmp_path, num_rounds=3)
         archiver = Archiver()
-        history = archiver.load_history(str(archive))
+        archiver.resume_session(str(archive))
+        history = archiver.load_history()
         assert len(history) == 3
 
     def test_load_history_round_nums_correct(self, tmp_path: Path):
@@ -161,7 +125,8 @@ class TestLoadHistory:
 
         archive = _create_archive(tmp_path, num_rounds=3)
         archiver = Archiver()
-        history = archiver.load_history(str(archive))
+        archiver.resume_session(str(archive))
+        history = archiver.load_history()
         assert [r.round_num for r in history] == [1, 2, 3]
 
     def test_load_history_expressions_populated(self, tmp_path: Path):
@@ -169,7 +134,8 @@ class TestLoadHistory:
 
         archive = _create_archive(tmp_path, num_rounds=2)
         archiver = Archiver()
-        history = archiver.load_history(str(archive))
+        archiver.resume_session(str(archive))
+        history = archiver.load_history()
         r1 = history[0]
         assert len(r1.expressions) == 2
         assert r1.expressions[0].agent_name == "Agent-A"
@@ -180,7 +146,8 @@ class TestLoadHistory:
 
         archive = _create_archive(tmp_path, num_rounds=2)
         archiver = Archiver()
-        history = archiver.load_history(str(archive))
+        archiver.resume_session(str(archive))
+        history = archiver.load_history()
         r1 = history[0]
         assert len(r1.challenges) == 2
         assert r1.challenges[1].agent_name == "Agent-B"
@@ -191,7 +158,8 @@ class TestLoadHistory:
 
         archive = _create_archive(tmp_path, num_rounds=1, with_host=True)
         archiver = Archiver()
-        history = archiver.load_history(str(archive))
+        archiver.resume_session(str(archive))
+        history = archiver.load_history()
         assert history[0].host_judgment is not None
         assert history[0].host_judgment["converged"] is False
 
@@ -200,7 +168,8 @@ class TestLoadHistory:
 
         archive = _create_archive(tmp_path, num_rounds=1, with_host=False)
         archiver = Archiver()
-        history = archiver.load_history(str(archive))
+        archiver.resume_session(str(archive))
+        history = archiver.load_history()
         assert history[0].host_judgment is None
 
 
@@ -216,7 +185,8 @@ class TestLoadContext:
 
         archive = _create_archive(tmp_path)
         archiver = Archiver()
-        ctx = archiver.load_context(str(archive))
+        archiver.resume_session(str(archive))
+        ctx = archiver.load_context()
         assert ctx == "Loaded context from archive"
 
     def test_load_context_missing_raises(self, tmp_path: Path):
@@ -224,9 +194,11 @@ class TestLoadContext:
 
         no_ctx = tmp_path / "no_ctx"
         no_ctx.mkdir()
+        (no_ctx / "rounds").mkdir()
         archiver = Archiver()
+        archiver.resume_session(str(no_ctx))
         with pytest.raises(FileNotFoundError, match="context.md not found"):
-            archiver.load_context(str(no_ctx))
+            archiver.load_context()
 
 
 # ---------------------------------------------------------------------------
@@ -235,36 +207,6 @@ class TestLoadContext:
 
 
 class TestEngineResume:
-
-    def _patch_engine(self, engine, judgments):
-        round_counter = {"n": 0}
-
-        async def mock_express(round_num, context, history):
-            return [
-                AgentUtterance("Agent-A", f"Expr-A-R{round_num}"),
-                AgentUtterance("Agent-B", f"Expr-B-R{round_num}"),
-            ]
-
-        async def mock_challenge(round_num, expressions):
-            return [
-                AgentUtterance("Agent-A", f"Chal-A-R{round_num}"),
-                AgentUtterance("Agent-B", f"Chal-B-R{round_num}"),
-            ]
-
-        async def mock_host_judge(history):
-            idx = round_counter["n"]
-            round_counter["n"] += 1
-            if idx < len(judgments):
-                return judgments[idx]
-            return {"converged": False, "reason": "", "remaining_disputes": []}
-
-        async def mock_host_summarize(history):
-            return "Final summary content"
-
-        engine._express = AsyncMock(side_effect=mock_express)
-        engine._challenge = AsyncMock(side_effect=mock_challenge)
-        engine._host_judge = AsyncMock(side_effect=mock_host_judge)
-        engine._host_summarize = AsyncMock(side_effect=mock_host_summarize)
 
     @patch("discuss_agent.engine.import_from_path")
     @patch("discuss_agent.engine.ContextManager")
@@ -277,7 +219,7 @@ class TestEngineResume:
         from discuss_agent.engine import DiscussionEngine
 
         archive = _create_archive(tmp_path, num_rounds=3)
-        config = _make_config(min_rounds=1, max_rounds=10)
+        config = make_config(min_rounds=1, max_rounds=10)
         engine = DiscussionEngine(config)
 
         # Don't mock archiver — use real one so load_history works
@@ -291,7 +233,7 @@ class TestEngineResume:
         judgments = [
             {"converged": True, "reason": "Agreement", "remaining_disputes": []},
         ]
-        self._patch_engine(engine, judgments)
+        patch_engine(engine, judgments)
 
         result = await engine.run(resume_path=str(archive), extra_rounds=1)
 
@@ -314,7 +256,7 @@ class TestEngineResume:
         from discuss_agent.engine import DiscussionEngine
 
         archive = _create_archive(tmp_path, num_rounds=2)
-        config = _make_config(min_rounds=1, max_rounds=10)
+        config = make_config(min_rounds=1, max_rounds=10)
         engine = DiscussionEngine(config)
 
         from discuss_agent.persistence import Archiver
@@ -363,7 +305,7 @@ class TestEngineResume:
         from discuss_agent.engine import DiscussionEngine
 
         archive = _create_archive(tmp_path, num_rounds=2)
-        config = _make_config(min_rounds=1, max_rounds=10)
+        config = make_config(min_rounds=1, max_rounds=10)
         engine = DiscussionEngine(config)
 
         from discuss_agent.persistence import Archiver
@@ -375,7 +317,7 @@ class TestEngineResume:
         judgments = [
             {"converged": False, "reason": "No", "remaining_disputes": ["X"]},
         ]
-        self._patch_engine(engine, judgments)
+        patch_engine(engine, judgments)
 
         result = await engine.run(resume_path=str(archive), extra_rounds=1)
 
@@ -399,7 +341,7 @@ class TestEngineResume:
         from discuss_agent.engine import DiscussionEngine
 
         archive = _create_archive(tmp_path, num_rounds=1)
-        config = _make_config(min_rounds=1, max_rounds=10)
+        config = make_config(min_rounds=1, max_rounds=10)
         engine = DiscussionEngine(config)
 
         from discuss_agent.persistence import Archiver
@@ -439,7 +381,7 @@ class TestEngineResume:
     ):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config()
+        config = make_config()
         engine = DiscussionEngine(config)
 
         with pytest.raises(FileNotFoundError):
@@ -451,13 +393,47 @@ class TestEngineResume:
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
     @pytest.mark.asyncio
+    async def test_resume_extra_rounds_none_raises(
+        self, MockAgent, MockCtxMgr, mock_import, tmp_path
+    ):
+        """Engine should raise ValueError when extra_rounds is None on resume."""
+        from discuss_agent.engine import DiscussionEngine
+
+        archive = _create_archive(tmp_path, num_rounds=1)
+        config = make_config()
+        engine = DiscussionEngine(config)
+
+        with pytest.raises(ValueError, match="extra_rounds must be a positive integer"):
+            await engine.run(resume_path=str(archive), extra_rounds=None)
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_resume_extra_rounds_zero_raises(
+        self, MockAgent, MockCtxMgr, mock_import, tmp_path
+    ):
+        """Engine should raise ValueError when extra_rounds is 0 on resume."""
+        from discuss_agent.engine import DiscussionEngine
+
+        archive = _create_archive(tmp_path, num_rounds=1)
+        config = make_config()
+        engine = DiscussionEngine(config)
+
+        with pytest.raises(ValueError, match="extra_rounds must be a positive integer"):
+            await engine.run(resume_path=str(archive), extra_rounds=0)
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
     async def test_normal_run_unaffected(
         self, MockAgent, MockCtxMgr, mock_import
     ):
         """run() without resume params behaves exactly as before."""
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(min_rounds=1, max_rounds=2)
+        config = make_config(min_rounds=1, max_rounds=2)
         engine = DiscussionEngine(config)
 
         engine._archiver = MagicMock()
@@ -468,7 +444,7 @@ class TestEngineResume:
         judgments = [
             {"converged": True, "reason": "Quick", "remaining_disputes": []},
         ]
-        self._patch_engine(engine, judgments)
+        patch_engine(engine, judgments)
 
         result = await engine.run()
 
@@ -488,7 +464,7 @@ class TestEngineResume:
         from discuss_agent.engine import DiscussionEngine
 
         archive = _create_archive(tmp_path, num_rounds=3)
-        config = _make_config(min_rounds=1, max_rounds=10)
+        config = make_config(min_rounds=1, max_rounds=10)
         engine = DiscussionEngine(config)
 
         from discuss_agent.persistence import Archiver
@@ -501,7 +477,7 @@ class TestEngineResume:
             {"converged": False, "reason": "No", "remaining_disputes": ["X"]},
             {"converged": False, "reason": "No", "remaining_disputes": ["X"]},
         ]
-        self._patch_engine(engine, judgments)
+        patch_engine(engine, judgments)
 
         result = await engine.run(resume_path=str(archive), extra_rounds=2)
 
@@ -593,3 +569,36 @@ class TestCLIResume:
                 resume_path=None,
                 extra_rounds=None,
             )
+
+    def test_rounds_without_resume_exits(self, sample_config_yaml):
+        """--rounds without --resume should exit with code 1."""
+        with patch("sys.argv", ["discuss_agent", sample_config_yaml, "--rounds", "2"]):
+            from discuss_agent.main import main
+
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+
+    def test_rounds_zero_exits(self, sample_config_yaml):
+        """--rounds 0 should exit with code 1."""
+        with patch(
+            "sys.argv",
+            ["discuss_agent", sample_config_yaml, "--resume", "/some/path", "--rounds", "0"],
+        ):
+            from discuss_agent.main import main
+
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+
+    def test_rounds_negative_exits(self, sample_config_yaml):
+        """--rounds -1 should exit with code 1."""
+        with patch(
+            "sys.argv",
+            ["discuss_agent", sample_config_yaml, "--resume", "/some/path", "--rounds", "-1"],
+        ):
+            from discuss_agent.main import main
+
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1

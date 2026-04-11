@@ -130,8 +130,10 @@ class Archiver:
         self._session_dir = str(session_path)
         return self._session_dir
 
-    def load_history(self, archive_path: str):
-        """Load round history from an archive's ``rounds/`` directory.
+    def load_history(self):
+        """Load round history from the current session's ``rounds/`` directory.
+
+        Must be called after :meth:`resume_session`.
 
         Returns
         -------
@@ -140,7 +142,7 @@ class Archiver:
         """
         from discuss_agent.models import AgentUtterance, RoundRecord
 
-        rounds_dir = Path(archive_path) / "rounds"
+        rounds_dir = Path(self._session_dir) / "rounds"
         # Discover which round numbers exist
         round_nums: set[int] = set()
         for f in rounds_dir.iterdir():
@@ -184,11 +186,14 @@ class Archiver:
 
         return history
 
-    def load_context(self, archive_path: str) -> str:
-        """Read ``context.md`` from an archive directory."""
-        ctx_path = Path(archive_path) / "context.md"
+    def load_context(self) -> str:
+        """Read ``context.md`` from the current session directory.
+
+        Must be called after :meth:`resume_session`.
+        """
+        ctx_path = Path(self._session_dir) / "context.md"
         if not ctx_path.exists():
-            raise FileNotFoundError(f"context.md not found in: {archive_path}")
+            raise FileNotFoundError(f"context.md not found in: {self._session_dir}")
         return ctx_path.read_text()
 
     def save_error_log(self, error: str) -> None:

@@ -2,69 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from discuss_agent.config import (
-    AgentConfig,
-    DiscussionConfig,
-    HostConfig,
-    ModelConfig,
-    ToolConfig,
-)
+from discuss_agent.config import ToolConfig
 from discuss_agent.models import AgentUtterance, RoundRecord
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class MockRunOutput:
-    """Stand-in for agno RunOutput."""
-
-    def __init__(self, content: str | None):
-        self.content = content
-
-
-def _make_config(
-    min_rounds: int = 2,
-    max_rounds: int = 5,
-    num_agents: int = 2,
-    tools: list[ToolConfig] | None = None,
-    context_builder: str | None = None,
-    agent_overrides: dict | None = None,
-    limitation: str | None = None,
-) -> DiscussionConfig:
-    agents = []
-    for i in range(num_agents):
-        name = f"Agent-{chr(65 + i)}"
-        overrides = (agent_overrides or {}).get(name, {})
-        agents.append(
-            AgentConfig(
-                name=name,
-                system_prompt=f"You are agent {chr(65 + i)}.",
-                extra_tools=overrides.get("extra_tools", []),
-                disable_tools=overrides.get("disable_tools", []),
-            )
-        )
-    return DiscussionConfig(
-        min_rounds=min_rounds,
-        max_rounds=max_rounds,
-        model_config=ModelConfig(model="claude-sonnet-4-20250514"),
-        agents=agents,
-        host=HostConfig(
-            convergence_prompt="Judge convergence.",
-            summary_prompt="Summarize the discussion.",
-        ),
-        tools=tools or [],
-        context={},
-        context_builder=context_builder,
-        limitation=limitation,
-    )
+from tests.shared import MockRunOutput, make_config, patch_engine
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +25,7 @@ class TestAgentCreation:
     def test_creates_agents_from_config(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(num_agents=3)
+        config = make_config(num_agents=3)
         engine = DiscussionEngine(config)
 
         assert MockAgent.call_count == 4
@@ -106,7 +52,7 @@ class TestPerAgentTools:
                 pass
 
         with patch("discuss_agent.engine.import_from_path", return_value=FakeTool):
-            config = _make_config(
+            config = make_config(
                 num_agents=2,
                 tools=[ToolConfig(path="pkg.FakeTool")],
             )
@@ -138,7 +84,7 @@ class TestPerAgentTools:
             raise ImportError(path)
 
         with patch("discuss_agent.engine.import_from_path", side_effect=mock_import):
-            config = _make_config(
+            config = make_config(
                 num_agents=2,
                 tools=[ToolConfig(path="pkg.FakeGlobal")],
                 agent_overrides={
@@ -173,7 +119,7 @@ class TestPerAgentTools:
             raise ImportError(path)
 
         with patch("discuss_agent.engine.import_from_path", side_effect=mock_import):
-            config = _make_config(
+            config = make_config(
                 num_agents=2,
                 tools=[
                     ToolConfig(path="pkg.FakeToolA"),
@@ -197,7 +143,7 @@ class TestPerAgentTools:
 
         with patch("discuss_agent.engine.import_from_path"):
             with caplog.at_level(logging.WARNING, logger="discuss_agent.engine"):
-                config = _make_config(
+                config = make_config(
                     num_agents=1,
                     agent_overrides={
                         "Agent-A": {"disable_tools": ["pkg.NonExistent"]},
@@ -218,7 +164,7 @@ class TestPerAgentTools:
                 pass
 
         with patch("discuss_agent.engine.import_from_path", return_value=FakeTool):
-            config = _make_config(
+            config = make_config(
                 num_agents=1,
                 tools=[ToolConfig(path="pkg.FakeTool")],
                 agent_overrides={
@@ -251,7 +197,7 @@ class TestExpress:
         mock_host.name = "Host"
 
         with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = _make_config(num_agents=2)
+            config = make_config(num_agents=2)
             engine = DiscussionEngine(config)
 
         async def mock_safe_call(agent, prompt):
@@ -272,7 +218,7 @@ class TestExpress:
     async def test_express_prompt_includes_history(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(num_agents=1)
+        config = make_config(num_agents=1)
         engine = DiscussionEngine(config)
         engine._agents[0].name = "Agent-A"
 
@@ -320,7 +266,7 @@ class TestChallenge:
         mock_host.name = "Host"
 
         with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = _make_config(num_agents=2)
+            config = make_config(num_agents=2)
             engine = DiscussionEngine(config)
 
         expressions = [
@@ -359,7 +305,7 @@ class TestHostJudgment:
     async def test_host_judge_parses_json(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config()
+        config = make_config()
         engine = DiscussionEngine(config)
 
         json_response = '{"converged": true, "reason": "All agree", "remaining_disputes": []}'
@@ -386,7 +332,7 @@ class TestHostJudgment:
     ):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config()
+        config = make_config()
         engine = DiscussionEngine(config)
         engine._host.arun = AsyncMock(return_value=MockRunOutput("This is not JSON at all!!!"))
 
@@ -416,7 +362,7 @@ class TestHostSummary:
     async def test_host_summarize_returns_content(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config()
+        config = make_config()
         engine = DiscussionEngine(config)
 
         history = [
@@ -459,7 +405,7 @@ class TestErrorHandling:
         mock_host.name = "Host"
 
         with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = _make_config(num_agents=2)
+            config = make_config(num_agents=2)
             engine = DiscussionEngine(config)
 
         async def mock_safe_call(agent, prompt):
@@ -486,7 +432,7 @@ class TestErrorHandling:
         mock_host.name = "Host"
 
         with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = _make_config(num_agents=2)
+            config = make_config(num_agents=2)
             engine = DiscussionEngine(config)
 
         async def mock_safe_call(agent, prompt):
@@ -504,36 +450,6 @@ class TestErrorHandling:
 
 class TestMainLoop:
 
-    def _patch_engine(self, engine, judgments):
-        round_counter = {"n": 0}
-
-        async def mock_express(round_num, context, history):
-            return [
-                AgentUtterance("Agent-A", f"Expr-A-R{round_num}"),
-                AgentUtterance("Agent-B", f"Expr-B-R{round_num}"),
-            ]
-
-        async def mock_challenge(round_num, expressions):
-            return [
-                AgentUtterance("Agent-A", f"Chal-A-R{round_num}"),
-                AgentUtterance("Agent-B", f"Chal-B-R{round_num}"),
-            ]
-
-        async def mock_host_judge(history):
-            idx = round_counter["n"]
-            round_counter["n"] += 1
-            if idx < len(judgments):
-                return judgments[idx]
-            return {"converged": False, "reason": "", "remaining_disputes": []}
-
-        async def mock_host_summarize(history):
-            return "Final summary content"
-
-        engine._express = AsyncMock(side_effect=mock_express)
-        engine._challenge = AsyncMock(side_effect=mock_challenge)
-        engine._host_judge = AsyncMock(side_effect=mock_host_judge)
-        engine._host_summarize = AsyncMock(side_effect=mock_host_summarize)
-
     @patch("discuss_agent.engine.import_from_path")
     @patch("discuss_agent.engine.ContextManager")
     @patch("discuss_agent.engine.Agent")
@@ -541,7 +457,7 @@ class TestMainLoop:
     async def test_full_loop_converges(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(min_rounds=2, max_rounds=5)
+        config = make_config(min_rounds=2, max_rounds=5)
         engine = DiscussionEngine(config)
 
         engine._archiver = MagicMock()
@@ -553,7 +469,7 @@ class TestMainLoop:
             {"converged": False, "reason": "Still debating", "remaining_disputes": ["topic X"]},
             {"converged": True, "reason": "Agreement reached", "remaining_disputes": []},
         ]
-        self._patch_engine(engine, judgments)
+        patch_engine(engine, judgments)
 
         result = await engine.run()
 
@@ -570,7 +486,7 @@ class TestMainLoop:
     async def test_min_rounds_enforced(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(min_rounds=2, max_rounds=5)
+        config = make_config(min_rounds=2, max_rounds=5)
         engine = DiscussionEngine(config)
 
         engine._archiver = MagicMock()
@@ -582,7 +498,7 @@ class TestMainLoop:
             {"converged": True, "reason": "Early convergence", "remaining_disputes": []},
             {"converged": True, "reason": "Still converged", "remaining_disputes": []},
         ]
-        self._patch_engine(engine, judgments)
+        patch_engine(engine, judgments)
 
         result = await engine.run()
 
@@ -596,7 +512,7 @@ class TestMainLoop:
     async def test_max_rounds_enforced(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(min_rounds=1, max_rounds=3)
+        config = make_config(min_rounds=1, max_rounds=3)
         engine = DiscussionEngine(config)
 
         engine._archiver = MagicMock()
@@ -609,7 +525,7 @@ class TestMainLoop:
             {"converged": False, "reason": "No", "remaining_disputes": ["X"]},
             {"converged": False, "reason": "No", "remaining_disputes": ["X", "Y"]},
         ]
-        self._patch_engine(engine, judgments)
+        patch_engine(engine, judgments)
 
         result = await engine.run()
 
@@ -625,7 +541,7 @@ class TestMainLoop:
     async def test_error_termination(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine, AllAgentsFailedError
 
-        config = _make_config(min_rounds=1, max_rounds=5)
+        config = make_config(min_rounds=1, max_rounds=5)
         engine = DiscussionEngine(config)
 
         engine._archiver = MagicMock()
@@ -672,7 +588,7 @@ class TestMainLoop:
     async def test_three_save_round_calls_per_round(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(min_rounds=1, max_rounds=2)
+        config = make_config(min_rounds=1, max_rounds=2)
         engine = DiscussionEngine(config)
 
         engine._archiver = MagicMock()
@@ -684,7 +600,7 @@ class TestMainLoop:
             {"converged": False, "reason": "No", "remaining_disputes": []},
             {"converged": True, "reason": "Yes", "remaining_disputes": []},
         ]
-        self._patch_engine(engine, judgments)
+        patch_engine(engine, judgments)
 
         result = await engine.run()
 
@@ -698,7 +614,7 @@ class TestMainLoop:
     async def test_no_tools_empty_list_runs(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(min_rounds=1, max_rounds=1)
+        config = make_config(min_rounds=1, max_rounds=1)
         engine = DiscussionEngine(config)
 
         engine._archiver = MagicMock()
@@ -709,7 +625,7 @@ class TestMainLoop:
         judgments = [
             {"converged": True, "reason": "Quick agreement", "remaining_disputes": []},
         ]
-        self._patch_engine(engine, judgments)
+        patch_engine(engine, judgments)
 
         result = await engine.run()
 
@@ -731,7 +647,7 @@ class TestLimitation:
     async def test_express_includes_limitation(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(num_agents=1, limitation="仅讨论技术可行性")
+        config = make_config(num_agents=1, limitation="仅讨论技术可行性")
         engine = DiscussionEngine(config)
         engine._agents[0].name = "Agent-A"
 
@@ -760,7 +676,7 @@ class TestLimitation:
         mock_host.name = "Host"
 
         with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = _make_config(num_agents=2, limitation="仅讨论技术可行性")
+            config = make_config(num_agents=2, limitation="仅讨论技术可行性")
             engine = DiscussionEngine(config)
 
         expressions = [
@@ -788,7 +704,7 @@ class TestLimitation:
     async def test_express_no_limitation_when_none(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(num_agents=1, limitation=None)
+        config = make_config(num_agents=1, limitation=None)
         engine = DiscussionEngine(config)
         engine._agents[0].name = "Agent-A"
 
@@ -810,7 +726,7 @@ class TestLimitation:
     async def test_express_no_limitation_when_empty_string(self, MockAgent, MockCtxMgr, mock_import):
         from discuss_agent.engine import DiscussionEngine
 
-        config = _make_config(num_agents=1, limitation="")
+        config = make_config(num_agents=1, limitation="")
         engine = DiscussionEngine(config)
         engine._agents[0].name = "Agent-A"
 

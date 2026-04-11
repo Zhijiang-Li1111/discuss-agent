@@ -326,11 +326,13 @@ class DiscussionEngine:
             Required when *resume_path* is provided.
         """
         if resume_path is not None:
+            if not extra_rounds or extra_rounds < 1:
+                raise ValueError("extra_rounds must be a positive integer when resuming")
             session_path = self._archiver.resume_session(resume_path)
-            history = self._archiver.load_history(resume_path)
-            context = self._archiver.load_context(resume_path)
+            history = self._archiver.load_history()
+            context = self._archiver.load_context()
             start_round = len(history) + 1
-            max_rounds = len(history) + (extra_rounds or 0)
+            max_rounds = len(history) + extra_rounds
         else:
             session_path = self._archiver.start_session(self._config)
             context = await self._context_mgr.build_initial_context()

@@ -31,6 +31,14 @@ def main() -> None:
         print("Error: --rounds is required when using --resume", file=sys.stderr)
         sys.exit(1)
 
+    if args.rounds is not None and not args.resume:
+        print("Error: --rounds can only be used with --resume", file=sys.stderr)
+        sys.exit(1)
+
+    if args.rounds is not None and args.rounds < 1:
+        print("Error: --rounds must be a positive integer", file=sys.stderr)
+        sys.exit(1)
+
     if not os.path.isfile(args.config):
         print(f"Error: config file not found: {args.config}", file=sys.stderr)
         sys.exit(1)

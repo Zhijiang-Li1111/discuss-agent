@@ -1,7 +1,5 @@
 import pytest
 
-from discuss_agent.config import ModelConfig
-
 
 @pytest.fixture
 def sample_config_dict():
