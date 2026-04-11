@@ -7,6 +7,7 @@ Generic multi-agent adversarial discussion framework.
 - **YAML-driven** configuration — agents, host, tools, context, model settings
 - **Full LLM API config** — `api_key` (with `env:` prefix), `base_url`, `temperature`, `max_tokens`; host can override model settings independently
 - **Per-agent tools** — global tools inherited by all agents, with per-agent `extra_tools` / `disable_tools`
+- **Discussion scope control** — optional `limitation` field restricts agents to a defined topic
 - **Runtime tool loading** via Python dotted paths — no `pip install` or entry_points needed
 - **Automatic session archiving** with secret redaction (config, rounds, summary)
 
@@ -23,6 +24,7 @@ Generic multi-agent adversarial discussion framework.
                           │  host:      {prompts, model override}│
                           │  tools:     [{path: "pkg.Tool"}]    │
                           │  context:   {arbitrary data}        │
+                          │  limitation: "scope restriction"    │
                           └──────────────┬──────────────────────┘
                                          │
                                          ▼
@@ -111,6 +113,8 @@ tools:
 
 context_builder: my_package.context.build_context
 
+# limitation: "仅讨论技术方案的可行性，不涉及预算"  # optional — restrict discussion scope
+
 agents:
   - name: "Optimist"
     system_prompt: |
@@ -161,6 +165,7 @@ Output is archived to `discussions/{timestamp}/` with config, rounds, and summar
 | `discussion` | `max_rounds` | No | 5 | Maximum rounds before forced exit |
 | `tools` | `path` | Yes | — | Python dotted path to a Toolkit subclass |
 | `context_builder` | — | No | — | Python dotted path to an async context builder function |
+| `limitation` | — | No | — | Restrict discussion scope; injected as a warning prefix in every round |
 | `agents` | `name` | Yes | — | Agent display name |
 | `agents` | `system_prompt` | Yes | — | Agent system prompt |
 | `agents` | `extra_tools` | No | `[]` | Additional tools for this agent (`[{path: "..."}]`) |
@@ -173,6 +178,21 @@ Output is archived to `discussions/{timestamp}/` with config, rounds, and summar
 | `host` | `temperature` | No | inherits | Override temperature for host |
 | `host` | `max_tokens` | No | inherits | Override max_tokens for host |
 | `context` | — | No | `{}` | Arbitrary dict passed to the context builder |
+
+## Discussion Scope Control (`limitation`)
+
+The optional top-level `limitation` field restricts agents to a specific topic. When set, the engine prepends a warning to every express and challenge prompt:
+
+```
+⚠️ 本次讨论范围仅限于：{limitation}
+```
+
+This keeps agents focused and prevents off-topic drift. When omitted, no prefix is injected and existing behavior is unchanged.
+
+```yaml
+# Example: restrict a product strategy discussion to technical feasibility only
+limitation: "仅讨论技术方案的可行性，不涉及预算和人力资源"
+```
 
 ## Tool Development
 
