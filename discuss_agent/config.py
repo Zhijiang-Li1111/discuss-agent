@@ -3,11 +3,61 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
 import yaml
 from agno.models.anthropic import Claude
+
+
+# ---------------------------------------------------------------------------
+# Template variable resolution
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_RE = re.compile(r"\{\{(\w+)\}\}")
+
+# Keys consumed by the framework — never treated as template variables.
+_RESERVED_KEYS = frozenset({
+    "discussion", "agents", "host", "tools", "context",
+    "context_builder", "limitation",
+})
+
+
+def _resolve_template_vars(raw: dict[str, Any]) -> None:
+    """Replace ``{{key}}`` placeholders in-place using top-level string values.
+
+    Only top-level keys whose values are plain strings (and that are not
+    reserved framework keys) are available as template variables.
+    """
+    # 1. Collect template variables from top-level string fields.
+    template_vars: dict[str, str] = {}
+    for key, value in raw.items():
+        if key not in _RESERVED_KEYS and isinstance(value, str):
+            template_vars[key] = value
+
+    if not template_vars:
+        return
+
+    def _replace(s: str) -> str:
+        def _sub(m: re.Match) -> str:
+            name = m.group(1)
+            return template_vars.get(name, m.group(0))
+        return _TEMPLATE_RE.sub(_sub, s)
+
+    def _walk(obj: Any) -> Any:
+        if isinstance(obj, str):
+            return _replace(obj)
+        if isinstance(obj, dict):
+            return {k: _walk(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_walk(item) for item in obj]
+        return obj
+
+    # 2. Walk and replace in all framework-consumed keys (not the var defs).
+    for key in list(raw.keys()):
+        if key in _RESERVED_KEYS:
+            raw[key] = _walk(raw[key])
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +195,9 @@ class ConfigLoader:
                 raise ValueError(
                     f"Missing required configuration key: '{key}'"
                 )
+
+        # --- resolve {{var}} template variables from top-level strings ---
+        _resolve_template_vars(raw)
 
         # --- discussion block (with defaults) ---
         disc = raw.get("discussion", {}) or {}

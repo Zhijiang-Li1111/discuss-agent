@@ -11,6 +11,7 @@ from discuss_agent.config import (
     ModelConfig,
     ToolConfig,
     resolve_env,
+    _resolve_template_vars,
 )
 
 
@@ -414,3 +415,78 @@ class TestConfigLoaderModelFields:
 
         cfg = ConfigLoader.load(str(path))
         assert cfg.host.api_key == "sk-host-key"
+
+
+class TestResolveTemplateVars:
+    """Tests for {{var}} template variable resolution."""
+
+    def test_top_level_string_replaces_in_agent_prompt(self, tmp_path, sample_config_dict):
+        d = dict(sample_config_dict)
+        d["reader_persona"] = "程序员，26-35岁"
+        d["agents"] = [
+            {"name": "A1", "system_prompt": "读者是{{reader_persona}}。"},
+        ]
+        path = tmp_path / "tpl.yaml"
+        path.write_text(yaml.dump(d, allow_unicode=True))
+        cfg = ConfigLoader.load(str(path))
+        assert cfg.agents[0].system_prompt == "读者是程序员，26-35岁。"
+
+    def test_top_level_string_replaces_in_host_prompts(self, tmp_path, sample_config_dict):
+        d = dict(sample_config_dict)
+        d["scope"] = "科技与AI领域"
+        d["host"] = {
+            "convergence_prompt": "范围：{{scope}}",
+            "summary_prompt": "总结{{scope}}讨论",
+        }
+        path = tmp_path / "tpl2.yaml"
+        path.write_text(yaml.dump(d, allow_unicode=True))
+        cfg = ConfigLoader.load(str(path))
+        assert cfg.host.convergence_prompt == "范围：科技与AI领域"
+        assert cfg.host.summary_prompt == "总结科技与AI领域讨论"
+
+    def test_multiple_vars_replaced(self, tmp_path, sample_config_dict):
+        d = dict(sample_config_dict)
+        d["var_a"] = "AAA"
+        d["var_b"] = "BBB"
+        d["agents"] = [
+            {"name": "A1", "system_prompt": "{{var_a}} and {{var_b}}"},
+        ]
+        path = tmp_path / "multi.yaml"
+        path.write_text(yaml.dump(d, allow_unicode=True))
+        cfg = ConfigLoader.load(str(path))
+        assert cfg.agents[0].system_prompt == "AAA and BBB"
+
+    def test_unknown_placeholder_left_as_is(self, tmp_path, sample_config_dict):
+        d = dict(sample_config_dict)
+        d["agents"] = [
+            {"name": "A1", "system_prompt": "Keep {{unknown_var}} intact."},
+        ]
+        path = tmp_path / "unknown.yaml"
+        path.write_text(yaml.dump(d, allow_unicode=True))
+        cfg = ConfigLoader.load(str(path))
+        assert "{{unknown_var}}" in cfg.agents[0].system_prompt
+
+    def test_reserved_keys_not_used_as_vars(self):
+        raw = {
+            "discussion": {"model": "m"},
+            "agents": [{"name": "A", "system_prompt": "Use {{discussion}}"}],
+            "host": {"convergence_prompt": "cp", "summary_prompt": "sp"},
+            "tools": [],
+        }
+        _resolve_template_vars(raw)
+        assert raw["agents"][0]["system_prompt"] == "Use {{discussion}}"
+
+    def test_non_string_top_level_ignored(self):
+        raw = {
+            "discussion": {"model": "m"},
+            "agents": [{"name": "A", "system_prompt": "{{num}}"}],
+            "host": {"convergence_prompt": "cp", "summary_prompt": "sp"},
+            "tools": [],
+            "num": 42,
+        }
+        _resolve_template_vars(raw)
+        assert raw["agents"][0]["system_prompt"] == "{{num}}"
+
+    def test_no_vars_is_noop(self, sample_config_yaml):
+        cfg = ConfigLoader.load(sample_config_yaml)
+        assert cfg.agents[0].system_prompt == "You are agent A."
