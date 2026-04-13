@@ -16,7 +16,7 @@ from agno.skills.loaders.local import LocalSkills
 from discuss_agent.config import DiscussionConfig, SkillConfig, build_claude
 from discuss_agent.context import ContextManager
 from discuss_agent.models import AgentUtterance, DiscussionResult, RoundRecord
-from discuss_agent.audit import AuditLogger
+from discuss_agent.audit import AuditLogger, generate_usage_summary
 from discuss_agent.persistence import Archiver
 from discuss_agent.registry import import_from_path
 
@@ -487,3 +487,14 @@ class DiscussionEngine:
         finally:
             if self._audit:
                 self._audit.close()
+            # Generate usage summary after all rounds complete
+            try:
+                generate_usage_summary(
+                    session_path,
+                    model_name=self._config.model_config.model,
+                    total_rounds=len(history),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to generate usage summary", exc_info=True
+                )
