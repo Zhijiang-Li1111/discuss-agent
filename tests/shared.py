@@ -62,13 +62,13 @@ def patch_engine(engine, judgments):
     """Replace internal engine methods with deterministic mocks."""
     round_counter = {"n": 0}
 
-    async def mock_express(round_num, context, history):
+    async def mock_express(round_num, context, history, **kwargs):
         return [
             AgentUtterance("Agent-A", f"Expr-A-R{round_num}"),
             AgentUtterance("Agent-B", f"Expr-B-R{round_num}"),
         ]
 
-    async def mock_challenge(round_num, expressions):
+    async def mock_challenge(round_num, expressions, **kwargs):
         return [
             AgentUtterance("Agent-A", f"Chal-A-R{round_num}"),
             AgentUtterance("Agent-B", f"Chal-B-R{round_num}"),

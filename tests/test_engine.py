@@ -551,13 +551,13 @@ class TestMainLoop:
 
         call_count = {"n": 0}
 
-        async def mock_express(round_num, context, history):
+        async def mock_express(round_num, context, history, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return [AgentUtterance("Agent-A", "R1 expression")]
             raise AllAgentsFailedError("All agents failed")
 
-        async def mock_challenge(round_num, expressions):
+        async def mock_challenge(round_num, expressions, **kwargs):
             return [AgentUtterance("Agent-A", "R1 challenge")]
 
         async def mock_host_judge(history):
@@ -740,3 +740,170 @@ class TestLimitation:
             await engine._express(1, "context-text", [])
 
         assert "⚠️" not in captured_prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# Guidance Injection
+# ---------------------------------------------------------------------------
+
+
+class TestGuidance:
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_express_includes_guidance(self, MockAgent, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = make_config(num_agents=1)
+        engine = DiscussionEngine(config)
+        engine._agents[0].name = "Agent-A"
+
+        captured_prompts = []
+
+        async def mock_safe_call(agent, prompt):
+            captured_prompts.append(prompt)
+            return "Response"
+
+        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
+            await engine._express(1, "context-text", [], guidance="Focus on cost analysis")
+
+        assert "📋 主编指导意见（请在讨论中优先回应）：Focus on cost analysis" in captured_prompts[0]
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @pytest.mark.asyncio
+    async def test_challenge_includes_guidance(self, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        mock_agents = [MagicMock(), MagicMock()]
+        mock_agents[0].name = "Agent-A"
+        mock_agents[1].name = "Agent-B"
+        mock_host = MagicMock()
+        mock_host.name = "Host"
+
+        with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
+            config = make_config(num_agents=2)
+            engine = DiscussionEngine(config)
+
+        expressions = [
+            AgentUtterance("Agent-A", "Opinion from A"),
+            AgentUtterance("Agent-B", "Opinion from B"),
+        ]
+
+        captured = {}
+
+        async def mock_safe_call(agent, prompt):
+            captured[agent.name] = prompt
+            return f"Challenge from {agent.name}"
+
+        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
+            await engine._challenge(1, expressions, guidance="Focus on cost analysis")
+
+        for name in ("Agent-A", "Agent-B"):
+            assert "📋 主编指导意见（请在质疑中优先关注）：Focus on cost analysis" in captured[name]
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_express_no_guidance_when_none(self, MockAgent, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = make_config(num_agents=1)
+        engine = DiscussionEngine(config)
+        engine._agents[0].name = "Agent-A"
+
+        captured_prompts = []
+
+        async def mock_safe_call(agent, prompt):
+            captured_prompts.append(prompt)
+            return "Response"
+
+        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
+            await engine._express(1, "context-text", [], guidance=None)
+
+        assert "📋" not in captured_prompts[0]
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_express_no_guidance_when_empty_string(self, MockAgent, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = make_config(num_agents=1)
+        engine = DiscussionEngine(config)
+        engine._agents[0].name = "Agent-A"
+
+        captured_prompts = []
+
+        async def mock_safe_call(agent, prompt):
+            captured_prompts.append(prompt)
+            return "Response"
+
+        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
+            await engine._express(1, "context-text", [], guidance="")
+
+        assert "📋" not in captured_prompts[0]
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_guidance_with_limitation_both_present(self, MockAgent, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = make_config(num_agents=1, limitation="仅讨论技术可行性")
+        engine = DiscussionEngine(config)
+        engine._agents[0].name = "Agent-A"
+
+        captured_prompts = []
+
+        async def mock_safe_call(agent, prompt):
+            captured_prompts.append(prompt)
+            return "Response"
+
+        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
+            await engine._express(1, "context-text", [], guidance="Focus on cost analysis")
+
+        prompt = captured_prompts[0]
+        assert "⚠️ 本次讨论范围仅限于：仅讨论技术可行性" in prompt
+        assert "📋 主编指导意见（请在讨论中优先回应）：Focus on cost analysis" in prompt
+        # Limitation should come before guidance
+        limitation_pos = prompt.index("⚠️")
+        guidance_pos = prompt.index("📋")
+        assert limitation_pos < guidance_pos
+
+    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.Agent")
+    @pytest.mark.asyncio
+    async def test_run_passes_guidance_to_express_and_challenge(self, MockAgent, MockCtxMgr, mock_import):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = make_config(min_rounds=1, max_rounds=1)
+        engine = DiscussionEngine(config)
+
+        engine._archiver = MagicMock()
+        engine._archiver.start_session.return_value = "/tmp/session"
+        engine._context_mgr.build_initial_context = AsyncMock(return_value="ctx")
+        engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
+
+        judgments = [
+            {"converged": True, "reason": "Quick agreement", "remaining_disputes": []},
+        ]
+        patch_engine(engine, judgments)
+
+        result = await engine.run(guidance="Focus on cost analysis")
+
+        assert result.converged is True
+        # Verify _express and _challenge were called with guidance kwarg
+        engine._express.assert_called_once()
+        engine._challenge.assert_called_once()
+        # Check the guidance keyword argument
+        express_kwargs = engine._express.call_args.kwargs
+        assert express_kwargs.get("guidance") == "Focus on cost analysis"
+        challenge_kwargs = engine._challenge.call_args.kwargs
+        assert challenge_kwargs.get("guidance") == "Focus on cost analysis"

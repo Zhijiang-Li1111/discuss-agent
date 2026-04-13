@@ -20,7 +20,7 @@ _TEMPLATE_RE = re.compile(r"\{\{(\w+)\}\}")
 # Keys consumed by the framework — never treated as template variables.
 _RESERVED_KEYS = frozenset({
     "discussion", "agents", "host", "tools", "context",
-    "context_builder", "limitation",
+    "context_builder", "limitation", "skills",
 })
 
 
@@ -136,11 +136,18 @@ class ToolConfig:
 
 
 @dataclass
+class SkillConfig:
+    """Reference to a skill directory path."""
+    path: str
+
+
+@dataclass
 class AgentConfig:
     name: str
     system_prompt: str
     extra_tools: list[ToolConfig] = field(default_factory=list)
     disable_tools: list[str] = field(default_factory=list)
+    skills: list[SkillConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -175,6 +182,7 @@ class DiscussionConfig:
     context: dict
     context_builder: str | None = None
     limitation: str | None = None
+    skills: list[SkillConfig] | None = None
 
 
 _REQUIRED_TOP_KEYS = ("agents", "host", "tools")
@@ -229,12 +237,16 @@ class ConfigLoader:
                 ToolConfig(path=t["path"]) for t in (a.get("extra_tools") or [])
             ]
             disable_tools = a.get("disable_tools") or []
+            agent_skills = [
+                SkillConfig(path=s["path"]) for s in (a.get("skills") or [])
+            ]
             agents.append(
                 AgentConfig(
                     name=a["name"],
                     system_prompt=a["system_prompt"],
                     extra_tools=extra_tools,
                     disable_tools=disable_tools,
+                    skills=agent_skills,
                 )
             )
         if not agents:
@@ -272,6 +284,17 @@ class ConfigLoader:
                 )
             tools.append(ToolConfig(path=entry["path"]))
 
+        # --- skills (optional, global skills shared by all agents) ---
+        raw_skills = raw.get("skills") or []
+        skills: list[SkillConfig] = []
+        for i, entry in enumerate(raw_skills):
+            if not isinstance(entry, dict) or "path" not in entry:
+                raise ValueError(
+                    f"skills[{i}]: each skill must be a dict with a 'path' key, "
+                    f"got {entry!r}"
+                )
+            skills.append(SkillConfig(path=entry["path"]))
+
         return DiscussionConfig(
             min_rounds=min_rounds,
             max_rounds=max_rounds,
@@ -282,4 +305,5 @@ class ConfigLoader:
             context=context,
             context_builder=context_builder,
             limitation=limitation,
+            skills=skills if skills else None,
         )

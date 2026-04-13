@@ -6,17 +6,40 @@ import asyncio
 import json
 import logging
 import re
+import time as _time
 from dataclasses import asdict
 
 from agno.agent import Agent
+from agno.skills import Skills
+from agno.skills.loaders.local import LocalSkills
 
-from discuss_agent.config import DiscussionConfig, build_claude
+from discuss_agent.config import DiscussionConfig, SkillConfig, build_claude
 from discuss_agent.context import ContextManager
 from discuss_agent.models import AgentUtterance, DiscussionResult, RoundRecord
+from discuss_agent.audit import AuditLogger
 from discuss_agent.persistence import Archiver
 from discuss_agent.registry import import_from_path
 
 logger = logging.getLogger(__name__)
+
+
+def _build_skills(
+    global_skills: list[SkillConfig] | None,
+    local_skills: list[SkillConfig] | None,
+) -> Skills | None:
+    """Build an agno Skills object from global + per-agent skill configs.
+
+    Returns None if no skills are configured.
+    """
+    all_configs: list[SkillConfig] = []
+    if global_skills:
+        all_configs.extend(global_skills)
+    if local_skills:
+        all_configs.extend(local_skills)
+    if not all_configs:
+        return None
+    loaders = [LocalSkills(path=sc.path, validate=False) for sc in all_configs]
+    return Skills(loaders=loaders)
 
 
 class AllAgentsFailedError(Exception):
@@ -29,6 +52,7 @@ class DiscussionEngine:
     def __init__(self, config: DiscussionConfig):
         self._config = config
         self._archiver = Archiver()
+        self._audit: AuditLogger | None = None
 
         # Import global tool classes
         global_tool_entries: list[tuple[str, type]] = []
@@ -88,11 +112,17 @@ class DiscussionEngine:
                 cls(context=config.context) for _, cls in agent_tool_entries
             ]
 
+            # Load skills for this agent (global + per-agent)
+            agent_skills = _build_skills(
+                config.skills, ac.skills if ac.skills else None
+            )
+
             agent = Agent(
                 name=ac.name,
                 model=discussion_model,
                 system_message=ac.system_prompt,
                 tools=tool_instances if tool_instances else None,
+                skills=agent_skills,
                 # Prevent unbounded memory growth from accumulated tool results
                 store_tool_messages=False,
                 add_history_to_context=False,
@@ -115,18 +145,36 @@ class DiscussionEngine:
 
     async def _safe_agent_call(self, agent: Agent, prompt: str) -> str | None:
         """Call *agent* with retry. Returns content or ``None`` on failure."""
+        if self._audit:
+            start_extras = AuditLogger.extract_call_start_extras(agent)
+            self._audit.log_call_start(agent.name, prompt, **start_extras)
+        t0 = _time.monotonic()
         for attempt in range(2):  # 1 retry
             try:
                 result = await agent.arun(input=prompt, stream=False)
                 if result.content:
+                    elapsed = (_time.monotonic() - t0) * 1000
+                    if self._audit:
+                        self._audit.log_from_run_output(agent.name, result)
+                        end_extras = AuditLogger.extract_call_end_extras(result)
+                        self._audit.log_call_end(agent.name, elapsed, result.content, "end_turn", **end_extras)
                     return result.content
                 if attempt == 0:
                     continue  # retry on empty content
+                elapsed = (_time.monotonic() - t0) * 1000
+                if self._audit:
+                    self._audit.log_call_end(agent.name, elapsed, None, "empty_content")
                 return None
-            except Exception:
+            except Exception as exc:
                 if attempt == 0:
                     continue
+                elapsed = (_time.monotonic() - t0) * 1000
+                if self._audit:
+                    self._audit.log_error(agent.name, str(exc), elapsed)
                 return None
+        elapsed = (_time.monotonic() - t0) * 1000
+        if self._audit:
+            self._audit.log_call_end(agent.name, elapsed, None, "exhausted_retries")
         return None
 
     # ------------------------------------------------------------------
@@ -153,7 +201,8 @@ class DiscussionEngine:
     # ------------------------------------------------------------------
 
     async def _express(
-        self, round_num: int, context: str, history: list[RoundRecord]
+        self, round_num: int, context: str, history: list[RoundRecord],
+        guidance: str | None = None,
     ) -> list[AgentUtterance]:
         """All agents express opinions in parallel."""
         history_text = self._format_history(history)
@@ -162,8 +211,13 @@ class DiscussionEngine:
         if self._config.limitation:
             limitation_prefix = f"⚠️ 本次讨论范围仅限于：{self._config.limitation}\n\n"
 
+        guidance_prefix = ""
+        if guidance:
+            guidance_prefix = f"📋 主编指导意见（请在讨论中优先回应）：{guidance}\n\n"
+
         prompt = (
             f"{limitation_prefix}"
+            f"{guidance_prefix}"
             f"{context}\n\n"
             f"{history_text}\n\n"
             f"这是第{round_num}轮讨论。请基于上述背景资料和此前的讨论记录，"
@@ -193,7 +247,8 @@ class DiscussionEngine:
     # ------------------------------------------------------------------
 
     async def _challenge(
-        self, round_num: int, expressions: list[AgentUtterance]
+        self, round_num: int, expressions: list[AgentUtterance],
+        guidance: str | None = None,
     ) -> list[AgentUtterance]:
         """Each agent challenges OTHER agents' expressions."""
 
@@ -208,8 +263,13 @@ class DiscussionEngine:
             if self._config.limitation:
                 limitation_prefix = f"⚠️ 本次讨论范围仅限于：{self._config.limitation}\n\n"
 
+            guidance_prefix = ""
+            if guidance:
+                guidance_prefix = f"📋 主编指导意见（请在质疑中优先关注）：{guidance}\n\n"
+
             prompt = (
                 f"{limitation_prefix}"
+                f"{guidance_prefix}"
                 f"以下是其他讨论者在第{round_num}轮的观点：\n\n"
                 f"{others_text}\n\n"
                 f"请仔细审视上述观点，找出其中的薄弱环节并提出有针对性的质疑。"
@@ -312,6 +372,7 @@ class DiscussionEngine:
         self,
         resume_path: str | None = None,
         extra_rounds: int | None = None,
+        guidance: str | None = None,
     ) -> DiscussionResult:
         """Run the full discussion loop.
 
@@ -324,17 +385,22 @@ class DiscussionEngine:
         extra_rounds:
             Number of additional rounds to run after the loaded history.
             Required when *resume_path* is provided.
+        guidance:
+            Editorial guidance injected into agent prompts to steer
+            the direction of the discussion.
         """
         if resume_path is not None:
             if not extra_rounds or extra_rounds < 1:
                 raise ValueError("extra_rounds must be a positive integer when resuming")
             session_path = self._archiver.resume_session(resume_path)
+            self._audit = AuditLogger(session_path)
             history = self._archiver.load_history()
             context = self._archiver.load_context()
             start_round = len(history) + 1
             max_rounds = len(history) + extra_rounds
         else:
             session_path = self._archiver.start_session(self._config)
+            self._audit = AuditLogger(session_path)
             context = await self._context_mgr.build_initial_context()
             self._archiver.save_context(context)
             history = []
@@ -344,7 +410,7 @@ class DiscussionEngine:
         try:
             for round_num in range(start_round, max_rounds + 1):
                 # Step 1: Express
-                expressions = await self._express(round_num, context, history)
+                expressions = await self._express(round_num, context, history, guidance=guidance)
                 self._archiver.save_round(
                     round_num,
                     "express",
@@ -352,7 +418,7 @@ class DiscussionEngine:
                 )
 
                 # Step 2: Challenge
-                challenges = await self._challenge(round_num, expressions)
+                challenges = await self._challenge(round_num, expressions, guidance=guidance)
                 self._archiver.save_round(
                     round_num,
                     "challenge",
@@ -417,3 +483,7 @@ class DiscussionEngine:
                 remaining_disputes=[],
                 terminated_by_error=True,
             )
+
+        finally:
+            if self._audit:
+                self._audit.close()

@@ -63,6 +63,69 @@ class TestCLI:
             captured = capsys.readouterr()
             assert "/tmp/discussions/2026-04-08_2100" in captured.out
 
+    def test_guidance_passed_to_engine(self, sample_config_yaml):
+        """CLI --guidance argument is forwarded to engine.run()."""
+        mock_result = DiscussionResult(
+            converged=True,
+            rounds_completed=2,
+            archive_path="/tmp/discussions/2026-04-08_2100",
+            summary="Test summary",
+            remaining_disputes=[],
+        )
+
+        with (
+            patch(
+                "sys.argv",
+                ["discuss_agent", sample_config_yaml, "--guidance", "Focus on cost analysis"],
+            ),
+            patch("discuss_agent.main.DiscussionEngine") as mock_engine_cls,
+            patch("discuss_agent.main.ConfigLoader") as mock_loader,
+        ):
+            mock_loader.load.return_value = MagicMock()
+            mock_engine = MagicMock()
+            mock_engine.run = AsyncMock(return_value=mock_result)
+            mock_engine_cls.return_value = mock_engine
+
+            from discuss_agent.main import main
+
+            main()
+
+            mock_engine.run.assert_called_once_with(
+                resume_path=None,
+                extra_rounds=None,
+                guidance="Focus on cost analysis",
+            )
+
+    def test_no_guidance_passes_none(self, sample_config_yaml):
+        """When --guidance is omitted, None is passed to engine.run()."""
+        mock_result = DiscussionResult(
+            converged=True,
+            rounds_completed=2,
+            archive_path="/tmp/discussions/2026-04-08_2100",
+            summary="Test summary",
+            remaining_disputes=[],
+        )
+
+        with (
+            patch("sys.argv", ["discuss_agent", sample_config_yaml]),
+            patch("discuss_agent.main.DiscussionEngine") as mock_engine_cls,
+            patch("discuss_agent.main.ConfigLoader") as mock_loader,
+        ):
+            mock_loader.load.return_value = MagicMock()
+            mock_engine = MagicMock()
+            mock_engine.run = AsyncMock(return_value=mock_result)
+            mock_engine_cls.return_value = mock_engine
+
+            from discuss_agent.main import main
+
+            main()
+
+            mock_engine.run.assert_called_once_with(
+                resume_path=None,
+                extra_rounds=None,
+                guidance=None,
+            )
+
     def test_nonexistent_config_exits(self):
         """AC-7.3: Nonexistent config file exits with code 1."""
         with patch("sys.argv", ["discuss_agent", "/nonexistent/config.yaml"]):

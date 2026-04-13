@@ -268,11 +268,11 @@ class TestEngineResume:
         # Capture the history passed to _express
         captured_history = []
 
-        async def mock_express(round_num, context, history):
+        async def mock_express(round_num, context, history, **kwargs):
             captured_history.append(list(history))
             return [AgentUtterance("Agent-A", f"Expr-A-R{round_num}")]
 
-        async def mock_challenge(round_num, expressions):
+        async def mock_challenge(round_num, expressions, **kwargs):
             return [AgentUtterance("Agent-A", f"Chal-A-R{round_num}")]
 
         async def mock_host_judge(history):
@@ -352,7 +352,7 @@ class TestEngineResume:
 
         captured_context = []
 
-        async def mock_express(round_num, context, history):
+        async def mock_express(round_num, context, history, **kwargs):
             captured_context.append(context)
             return [AgentUtterance("Agent-A", "opinion")]
 
@@ -539,6 +539,7 @@ class TestCLIResume:
             mock_engine.run.assert_called_once_with(
                 resume_path="/tmp/discussions/2026-04-11_2159",
                 extra_rounds=2,
+                guidance=None,
             )
 
     def test_normal_run_passes_none(self, sample_config_yaml):
@@ -568,6 +569,7 @@ class TestCLIResume:
             mock_engine.run.assert_called_once_with(
                 resume_path=None,
                 extra_rounds=None,
+                guidance=None,
             )
 
     def test_rounds_without_resume_exits(self, sample_config_yaml):

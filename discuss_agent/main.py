@@ -25,6 +25,10 @@ def main() -> None:
         type=int,
         help="Number of additional rounds to run (used with --resume)",
     )
+    parser.add_argument(
+        "--guidance",
+        help="Editorial guidance injected into agent prompts to steer the discussion",
+    )
     args = parser.parse_args()
 
     if args.resume and args.rounds is None:
@@ -45,7 +49,13 @@ def main() -> None:
 
     config = ConfigLoader.load(args.config)
     engine = DiscussionEngine(config)
-    result = asyncio.run(engine.run(resume_path=args.resume, extra_rounds=args.rounds))
+    result = asyncio.run(
+        engine.run(
+            resume_path=args.resume,
+            extra_rounds=args.rounds,
+            guidance=args.guidance,
+        )
+    )
 
     print(f"Discussion archived at: {result.archive_path}")
     if result.converged:
