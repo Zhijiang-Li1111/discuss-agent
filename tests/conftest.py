@@ -23,7 +23,7 @@ def sample_config_dict():
             {"path": "tests.helpers.FakeToolB"},
         ],
         "context": {
-            "research_dir": "~/ima-downloads/",
+            "research_dir": "~/research-data/",
             "published_file": "PUBLISHED.md",
             "research_days": 2,
         },

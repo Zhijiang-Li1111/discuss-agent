@@ -29,7 +29,7 @@ def _make_config() -> DiscussionConfig:
             summary_prompt="summarize",
         ),
         tools=[],
-        context={"research_dir": "~/ima-downloads/", "published_file": "PUBLISHED.md", "research_days": 2},
+        context={"research_dir": "~/research-data/", "published_file": "PUBLISHED.md", "research_days": 2},
     )
 
 
