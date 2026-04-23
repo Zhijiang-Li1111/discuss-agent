@@ -52,7 +52,7 @@ class TestConfigLoaderFullParse:
     def test_context(self, sample_config_yaml):
         cfg = ConfigLoader.load(sample_config_yaml)
         assert isinstance(cfg.context, dict)
-        assert cfg.context["research_dir"] == "~/ima-downloads/"
+        assert cfg.context["research_dir"] == "~/research-data/"
         assert cfg.context["published_file"] == "PUBLISHED.md"
         assert cfg.context["research_days"] == 2
 

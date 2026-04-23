@@ -148,7 +148,7 @@ tools:
   - published
 
 context:
-  research_dir: "~/ima-downloads/"
+  research_dir: "~/research-data/"
   published_file: "PUBLISHED.md"
   research_days: 2
 ```
@@ -202,7 +202,7 @@ class ResearchListTools(Toolkit):
     def __init__(self, context: dict | None = None):
         super().__init__(name="research_list")
         ctx = context or {}
-        self._research_dir = ctx.get("research_dir", "~/ima-downloads/")
+        self._research_dir = ctx.get("research_dir", "~/research-data/")
 
 # 业务侧 tool 示例：不需要 context 参数的 tool
 class PublishedTools(Toolkit):
@@ -353,7 +353,7 @@ README.md 包含：
 
 - **AC-1.1**: discuss-agent 包内不包含 `tools/` 目录或业务 tool 代码
 - **AC-1.2**: discuss-agent 包内不包含 `configs/` 目录或业务配置文件
-- **AC-1.3**: discuss-agent 代码中不存在对 `research_list`、`research_content`、`trending`、`published`、`ima-downloads`、`PUBLISHED.md`、`pdftotext` 的导入或硬编码引用
+- **AC-1.3**: discuss-agent 代码中不存在对 `research_list`、`research_content`、`trending`、`published`、`research-data`、`PUBLISHED.md`、`pdftotext` 的导入或硬编码引用
 - **AC-1.4**: `context.py` 不直接导入任何 tool 类，`build_initial_context` 委托给已注册的 context builder
 
 ### 插件 API

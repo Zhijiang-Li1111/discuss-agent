@@ -163,7 +163,7 @@ tools:
   - published
 
 context:
-  research_dir: "~/ima-downloads/"
+  research_dir: "~/research-data/"
   published_file: "PUBLISHED.md"
   research_days: 2  # 取最近几天的研报
 ```
@@ -288,7 +288,7 @@ Tool 按 Anthropic tool-description-standard 编写（纯文本描述，3-4+ 句
 **功能：** 列出指定天数内的研报标题
 **输入：** `days: int`（默认 2）, `research_dir: str`
 **输出：** `日期-机构-标题` 格式的列表
-**来源：** 扫描 `~/ima-downloads/` 目录下的 PDF 文件名
+**来源：** 扫描 `~/research-data/` 目录下的 PDF 文件名
 
 **验收标准：**
 - AC-5.1: 返回最近 N 天的研报标题列表

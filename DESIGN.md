@@ -267,7 +267,7 @@ discussions/
 
 | 数据源 | 状态 | 获取方式 |
 |--------|------|----------|
-| IMA 研报同步 | ✅ 已完成 | cron 每天 18:00，`~/ima-downloads/` |
+| IMA 研报同步 | ✅ 已完成 | cron 每天 18:00，`~/research-data/` |
 | 研报去水印 | ✅ 已完成 | 同步后自动执行 |
 | NewsNow 热榜 | 待部署 | MCP Server，`ourongxing/newsnow` |
 | IMA MCP | 待接入 | `highkay/tencent-ima-copilot-mcp` |
