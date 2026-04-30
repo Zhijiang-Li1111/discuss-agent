@@ -159,6 +159,7 @@ class HostConfig:
     base_url: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
+    skip_summary: bool = False
 
     def resolve_model(self, discussion_model: ModelConfig) -> ModelConfig:
         """Merge host overrides onto *discussion_model*, returning a new ModelConfig."""
@@ -262,6 +263,7 @@ class ConfigLoader:
             base_url=resolve_env(host_raw.get("base_url")),
             temperature=host_raw.get("temperature"),
             max_tokens=host_raw.get("max_tokens"),
+            skip_summary=bool(host_raw.get("skip_summary", False)),
         )
 
         # --- context (optional, opaque dict passed to context builder) ---

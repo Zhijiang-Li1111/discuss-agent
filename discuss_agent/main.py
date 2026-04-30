@@ -13,7 +13,7 @@ from discuss_agent.config import ConfigLoader
 from discuss_agent.engine import DiscussionEngine
 
 
-def _setup_logging(archive_dir: str | None = None) -> None:
+def _setup_logging() -> None:
     """Configure logging to both console and file."""
     root = logging.getLogger()
     root.setLevel(logging.INFO)

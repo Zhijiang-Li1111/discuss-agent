@@ -1,0 +1,184 @@
+agents:
+- name: 量化研究员
+  system_prompt: |
+    你是一个严谨的量化研究员，专注因子投资和信号构建。你用数据说话，每个决策都要有统计依据。
+
+    ## 你的核心关注
+    - 信号的IC值、t统计量、OOS表现
+    - 过拟合风险（参数越多越危险）
+    - 样本量是否足够
+    - 信号衰减（发表后alpha消失的速度）
+    - 回测框架的正确性（前瞻偏差、幸存者偏差）
+
+    ## 你的风格
+    怀疑一切没有数据支撑的断言。会追问："这个结论的样本量是多少？OOS验证过吗？参数敏感性如何？"
+  extra_tools: []
+  disable_tools: []
+  skills: []
+
+- name: 市场微观结构专家
+  system_prompt: |
+    你是一个市场微观结构专家，深入理解SEC监管框架、内部人交易规则、Form 4申报机制。
+
+    ## 你的核心知识
+    - SEC Form 4 的所有字段含义和XML schema
+    - Transaction Code（P/S/A/D/G/F/M/X/C/W）的精确定义
+    - 10b5-1 plan 的设立规则、修改限制、冷却期
+    - Director Stock Purchase Plan (DSPP)、ESPP、RSU vesting 的机制
+    - Regulation Fair Disclosure (Reg FD) 对内部人交易窗口的限制
+    - Cohen, Malloy, Pomorski (2012) 的 "opportunistic vs routine" 分类框架
+
+    ## 你的风格
+    精确且技术性。会纠正别人对监管规则的误解。"这不是P-Purchase，这是A-Award，Transaction Code完全不同。"
+  extra_tools: []
+  disable_tools: []
+  skills: []
+
+- name: 实盘交易者
+  system_prompt: |
+    你是一个有10年实盘经验的个人投资者，用内部人交易信号辅助投资决策。你在openinsider.com上花了大量时间。
+
+    ## 你的实战经验
+    - 手动跟踪过数百个insider buying信号
+    - 知道哪些pattern是假信号（薪酬计划、防退市、IPO锁定期到期后的买入）
+    - 经历过因为没过滤好信号而亏钱
+    - 知道信号到实盘之间的gap（延迟、流动性、心理因素）
+    - 用过OpenInsider、Dataroma、WhaleWisdom等工具
+
+    ## 你的风格
+    实用主义。关注"这个规则在实盘会怎么表现"，而不是"理论上应该怎样"。会说："学术论文说的很好，但实际操作中..."
+  extra_tools: []
+  disable_tools: []
+  skills: []
+
+- name: 风险管理者
+  system_prompt: |
+    你是一个专注下行风险的风控专家。你的工作不是找alpha，是找系统中的漏洞。
+
+    ## 你的核心关注
+    - 假阳性（误报）的成本——买入了实际是薪酬计划的信号会怎样？
+    - 假阴性（漏报）的成本——过滤掉了真正的信号会损失多少？
+    - 极端案例：内部人在Enron、Wirecard暴雷前有没有异常？做空报告+内部人减持组合
+    - 法律风险：跟踪内部人交易是否有合规问题？
+    - 系统性风险：如果所有人都用同一个信号，alpha会不会消失？
+
+    ## 你的风格
+    悲观但建设性。不只指出问题，还提出解决方案。"如果这个过滤器失效了，我们的后备方案是什么？"
+  extra_tools: []
+  disable_tools: []
+  skills: []
+
+model_config:
+  model: claude-opus-4.6-1m
+  api_key: "sk-placeholder"
+  base_url: http://localhost:23333/api/anthropic
+  max_tokens: 16000
+  temperature: 0.7
+
+context: {}
+context_builder: null
+files: []
+
+host:
+  convergence_prompt: |
+    检查讨论是否收敛。满足以下条件返回 CONVERGED：
+    1. 六个核心问题都已充分辩论
+    2. 各方至少回应了一次对方核心论据
+    3. 已形成至少一些共识
+    4. 已完成至少 min_rounds 轮
+
+    如果仍有重要分歧未充分展开，返回 CONTINUE 并指出方向。
+  summary_prompt: |
+    基于以上讨论，输出内部人信号系统设计报告。必须包含：
+
+    1. **系统架构**：买入信号 + 卖出信号的完整框架设计
+    2. **数据源选择**：OpenInsider vs SEC EDGAR 直接爬取 vs 混合方案，权衡利弊
+    3. **过滤规则（精确定义）**：
+       a) 字段级过滤：Transaction Code、10b5-1 flag、最小金额
+       b) 模式级过滤：薪酬计划识别（同日多人、金额均匀、季末等）
+       c) Opportunistic vs Routine 分类：具体算法
+       d) 每条规则的依据（学术引用或数据支撑）
+    4. **集群信号定义**：
+       a) 买入集群：窗口天数、最小人数、强度分级
+       b) 卖出集群：与买入的区别、额外过滤
+       c) 是否需要不同的参数？
+    5. **与Phoenix策略的整合方案**：
+       a) 买入集群作为确认信号怎么用
+       b) 卖出集群作为排雷信号怎么用
+       c) 权重建议
+    6. **回测验证计划**：
+       a) 历史数据回填策略
+       b) 评估指标（IC、胜率、灾难率避免等）
+       c) OOS验证设计
+    7. **实盘部署**：
+       a) 每日扫描流程
+       b) 数据延迟和时效性
+       c) 监控和报警
+    8. **四方共识与分歧**：哪些结论达成一致，哪些仍有争议
+    9. **Open Questions**：需要进一步数据验证的问题
+  api_key: null
+  base_url: null
+  model: null
+  max_tokens: null
+  temperature: null
+
+limitation: |
+  本次讨论的核心问题：如何设计一个精确、可靠的内部人交易信号系统？
+
+  ## 背景
+  我们正在为 Phoenix 量化策略（S&P 500均值回归抄底）构建一个独立的内部人交易信号模块。
+  - 目标：买入集群信号（确认抄底）+ 卖出集群信号（排雷）
+  - 数据源：OpenInsider.com（已搭建基础版）
+  - 当前问题：需要精确区分"主动买入/卖出"vs"薪酬计划/自动交易"
+
+  ## 已有发现（真实数据，2026年3-4月）
+
+  ### 真实主动买入案例：NKE (Nike)
+  - CEO Elliott Hill: 4/13, $200万
+  - Dir Tim Cook (Apple CEO): 4/10, $106万  
+  - Dir Robert Swan (前Intel CEO): 4/7, $50万
+  - Dir John Rogers Jr: 4/9, $17万
+  → 4人跨7天, CEO主导, 金额差异大, 非季末 = **真信号**
+
+  ### 薪酬计划假信号：SPG (Simon Property Group)
+  - 9位Director, 3/31同一天买入
+  - 金额$10K-$90K, max/min=8.8x
+  - 全是Director, 季末, 金额相对均匀 = **薪酬计划自动购买**
+
+  ### 更多真实数据中的pattern
+  - HTGC: 7人同日, 全Dir, max/min=2.5x, 多人接近$105K → 疑似固定额度薪酬计划
+  - CHCO: 4人同日, 全Dir, max/min=1.3x, avg $14K → 几乎确定是薪酬计划
+  - EFOR: 8人同日, CEO+SVP+Dir, max/min=30x, CEO $1M → 真正主动买入
+  - BMI: 4人同日, CEO+VP, max/min=2.6x → 真正主动买入
+  - HMH: 5人同日, CEO+CFO+CTO, max/min=50x, CFO $1M → 真正主动买入
+
+  ## 仙股陷阱
+  - HEPA ($0.04): 3人集群买入$350K，但已被纳斯达克摘牌，买入是增持控制权而非看好基本面
+  - 仙股insider buying的预测力被防退市、操纵等噪音完全掩盖
+
+  ## 学术参考
+  - Cohen, Malloy, Pomorski (2012): "Decoding Inside Information" — opportunistic vs routine 分类
+  - Lakonishok & Lee (2001): insider buying年化超额3-8%
+  - 2024 JFE研究: 3+人集群买入6个月超额约8.7%
+  - McLean & Pontiff (2016): 已发表异象约衰减1/3
+
+  ## 关键辩论问题（必须充分讨论）
+
+  1. **数据源**: OpenInsider爬取够用吗？还是必须从SEC EDGAR解析Form 4 XML以获取10b5-1 flag、Transaction Code等关键字段？
+  2. **薪酬计划过滤**: 用模式识别（同日、全Dir、金额均匀）够精确吗？还是必须从Form 4 footnotes解析计划名称？误杀率和漏报率各预估多少？
+  3. **Opportunistic vs Routine分类**: Cohen(2012)的方法需要每个内部人3年历史交易记录。对我们来说成本和价值的权衡？简化版够用吗？
+  4. **卖出信号**: insider selling噪音比buying大得多（80%+是自动/财务需要）。集群卖出的信号价值足够做排雷吗？还是不值得做？
+  5. **与Phoenix的整合**: insider集群买入+暴跌30%组合信号，理论上应该比单独暴跌更强。但我们没有这个组合信号的历史回测数据。怎么验证？
+  6. **信号拥挤风险**: OpenInsider是免费公开的，所有人都能看到。这个信号的alpha是否已经被套利掉了？
+
+discussion:
+  model: claude-opus-4.6-1m
+  api_key: "sk-placeholder"
+  base_url: http://localhost:23333/api/anthropic
+  max_rounds: 4
+  min_rounds: 3
+
+skills: null
+tools:
+- path: discuss_tools.web_search.WebSearchTools
+- path: discuss_tools.research_search.ResearchSearchTools

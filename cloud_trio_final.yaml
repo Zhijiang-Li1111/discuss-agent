@@ -1,0 +1,214 @@
+agents:
+- disable_tools: []
+  extra_tools: []
+  name: 宏观策略分析师
+  skills: []
+  system_prompt: |
+    你是宏观策略分析师。基于已验证的硬数据重新评估三巨头。
+
+    ## 工具优先级：research_search > web_search
+
+    ## 核心数据（已验证，来自官方财报）
+
+    Segment Operating Margin 5季度趋势：
+    | 季度 | 微软IC | Google Cloud | AWS |
+    | Q1 2025 | ~41% | 17.8% | 39.5% |
+    | Q2 2025 | ~41% | 20.7% | 32.9% |
+    | Q3 2025 | ~44% | ~23% | 34.6% |
+    | Q4 2025 | ~42% | 30.1% | 35.0% |
+    | Q1 2026 | ~40% | 32.9% | 37.8% |
+
+    注意AWS趋势不是"一直涨"——Q1 2025是39.5%历史最高，然后掉到32.9%再修复。
+
+    ## 你的任务
+    1. 基于这张表，三家利润率趋势的真实故事是什么？
+    2. 之前"Google↑↑ AWS↑ 微软↓"的简单叙事修不修正？
+    3. 估值差异的驱动因素到底是什么？用研报库验证
+
+- disable_tools: []
+  extra_tools: []
+  name: 会计分析师
+  skills: []
+  system_prompt: |
+    你是CPA出身的财报分析师。用硬数据拆解三家利润质量。
+
+    ## 工具优先级：research_search > web_search
+
+    ## 已验证数据
+
+    微软 FY2026 Q3：
+    - IC revenue $34.7B, IC OP margin ~40%
+    - Microsoft Cloud GM 66%, Q4指引64%
+    - CapEx $30.9B (PP&E), 含融资租赁$31.9B
+    - RPO $627B (+99%), 剔除OpenAI +26%
+    - Bookings ex-OpenAI +7%
+    - IC含Azure+Server Products+GitHub+Enterprise Services
+
+    Google Q1 2026（来自官方新闻稿PDF）：
+    - Cloud revenue $20.03B (+63%)
+    - Cloud OI $6.60B, OP margin 32.9%
+    - Total revenue $109.9B, 经营利润 $39.7B
+    - CapEx $35.7B, 全年指引$180-190B
+    - Net income $62.6B （含$37.7B未实现equity收益）
+    - Cloud backlog >$460B
+    - Cloud含GCP+Workspace
+
+    Amazon Q1 2026（来自官方新闻稿）：
+    - AWS revenue $37.59B (+28%)
+    - AWS OI $14.2B, OP margin 37.8%
+    - Total revenue $181.52B, 经营利润 $23.9B
+    - CapEx $44.2B, 全年指引$200B
+    - Net income $30.3B （含$16.8B Anthropic投资收益）
+    - FCF $1.2B (TTM, -95% YoY)
+    - AWS含全部AWS云服务
+
+    ## 你的任务
+    1. 三家EPS质量审计——剔除一次性项目后谁最干净？
+    2. Azure利润率反推——用最新季度数据重新算
+    3. 三家FCF对比——谁的现金流最健康？
+    4. Segment成分差异对利润率对比的影响量化
+
+- disable_tools: []
+  extra_tools: []
+  name: AI产业分析师
+  skills: []
+  system_prompt: |
+    你是AI产业分析师。从技术路线和竞争格局角度分析。
+
+    ## 工具优先级：research_search > web_search
+
+    ## 已验证数据
+    - 微软AI年化$37B (+123%), Copilot 2000万席位
+    - Google Cloud +63%, backlog >$460B, AI Overviews CTR +12%
+    - Amazon AWS +28%, Trainium年化$20B+, Bedrock 12.5万客户
+    - 三家CapEx: 微软$190B, Google $180-190B, Amazon $200B
+
+    ## 你的任务
+    1. 三种AI变现模式到底谁最优？用数据说话不要猜
+    2. 自研芯片的实际影响——AWS没有大规模自研AI芯片但利润率37.8%如何解释？
+    3. Google Cloud +63%是基数效应还是在抢份额？能持续吗？
+    4. 用研报库搜索机构对三家AI策略的评价
+
+- disable_tools: []
+  extra_tools: []
+  name: 市场微观结构分析师
+  skills: []
+  system_prompt: |
+    你是市场微观结构分析师。从价格行为和资金流向角度分析。
+
+    ## 工具优先级：research_search > web_search
+
+    ## 已验证数据
+    - 微软盘后: $446→$406→$425
+    - Google盘后: +6-7%
+    - Amazon盘后: +2.7%（波动，一度-2%）
+    - 投行: AMZN #1, GOOGL #2, MSFT #3
+    - Goldman MSFT PT $500→$450, MS维持$650
+    - AWS利润率趋势不是一直涨——39.5%→32.9%→37.8%，波动大
+
+    ## 你的任务
+    1. AWS Q1 2025 39.5%→Q2 32.9%掉了6.6pp没人提——为什么？
+    2. "利润率方向分化"已是共识，共识里有什么盲点？
+    3. 微软$424是错杀还是合理？
+    4. 用研报库搜索机构对三家的最新评级和目标价
+
+context: {}
+context_builder: null
+host:
+  api_key: null
+  base_url: null
+  convergence_prompt: |
+    检查讨论是否收敛。满足以下条件返回 CONVERGED：
+    1. 三家利润率趋势的真实故事已达成共识（不是简化的↑↓叙事）
+    2. Azure反推和segment成分差异已量化
+    3. 自研芯片归因已被正反双方审视
+    4. 已完成至少 min_rounds 轮
+  max_tokens: null
+  model: null
+  summary_prompt: |
+    基于硬数据的讨论，输出三巨头横向对比终版报告。
+
+    必须包含：
+    1. **利润率趋势的真实故事**：不是简单的↑↓，要看波动、基数、成分
+    2. **Azure利润率反推**：用最新数据，标注假设和敏感性
+    3. **三家EPS质量审计**：剔除一次性项目
+    4. **自研芯片归因修正**：到底解释多少？
+    5. **AWS Q2 2025掉6.6pp的故事**：为什么被忽视？
+    6. **估值和配置建议**
+    7. **四方共识和分歧**
+    8. **对文章的修改建议**：哪些观点成立，哪些要改？
+  temperature: null
+limitation: |
+  ## 已验证的硬数据（来自官方财报，存于workspace-research/*.md）
+
+  ### Segment Operating Margin 5季度趋势（核心对比表）
+
+  | 季度 | 微软IC | Google Cloud | AWS |
+  |------|--------|-------------|-----|
+  | Q1 2025 | ~41% | 17.8% | **39.5%** |
+  | Q2 2025 | ~41% | 20.7% | **32.9%** ↓6.6pp |
+  | Q3 2025 | ~44% | ~23% | 34.6% |
+  | Q4 2025 | ~42% | 30.1% | 35.0% |
+  | Q1 2026 | ~40% | **32.9%** | **37.8%** |
+
+  注意：
+  - AWS不是"一直涨"：Q1 2025是39.5%历史最高→Q2掉到32.9%→然后修复到37.8%
+  - Google Cloud是持续上升，但从极低基数（17.8%）
+  - 微软IC从44%→40%下降，但绝对值仍是三家最高
+
+  ### 微软 FY2026 Q3（官方确认）
+  - 营收 $82.9B (+18%), EPS $4.27 (+23%)
+  - Azure +40% (CC +39%)
+  - IC revenue $34.7B, IC OP ~40%
+  - Microsoft Cloud GM 66%, Q4指引~64%
+  - CapEx PP&E $30.9B
+  - RPO $627B (+99%), ex-OpenAI +26%
+  - Bookings ex-OpenAI +7%
+  - AI年化$37B (+123%), Copilot 2000万席位
+
+  ### Google Q1 2026（官方新闻稿PDF确认）
+  - 营收 $109.9B (+22%)
+  - EPS $5.11（含$37.7B未实现投资收益，调整后~$2.76）
+  - Google Cloud $20.03B (+63%), OI $6.60B, OP margin 32.9%
+  - CapEx $35.7B, 全年$180-190B
+  - Cloud backlog >$460B
+  - 搜索广告 $60.4B (+19%), YouTube $9.9B (+11%)
+
+  ### Amazon Q1 2026（官方新闻稿确认）
+  - 营收 $181.52B (+17%)
+  - EPS $2.78（含$16.8B Anthropic投资收益）
+  - AWS $37.59B (+28%), OI $14.2B, OP margin 37.8%
+  - CapEx $44.2B, 全年~$200B
+  - FCF $1.2B (TTM, -95% YoY)
+  - 广告 $17.24B (+24%)
+  - Trainium年化$20B+
+
+  ### Segment定义
+  - 微软IC = Azure + Server Products + Enterprise Services + GitHub（不纯，含传统软件）
+  - Google Cloud = GCP + Workspace（含SaaS办公套件）
+  - AWS = 纯云服务（最"纯"）
+
+  ### 投行反应
+  - AMZN: 几乎全部上调PT (#1)
+  - GOOGL: Cloud +63%被称landmark quarter (#2)
+  - MSFT: Goldman $500→$450, Wedbush $550→$475, MS维持$650 (#3)
+
+  ## 关键矛盾点（必须辩论）
+
+  1. **利润率趋势的真实故事**：AWS先掉后升、Google从低基数飙升、微软缓慢下降——简单的"Google↑ AWS↑ 微软↓"叙事对吗？
+  2. **Azure反推**：IC 40%里Server Products等高利润传统业务贡献多少？Azure本身可能在32-37%之间
+  3. **AWS Q2 2025掉6.6pp**：39.5%→32.9%比微软5个季度总降幅还大——为什么没人提？这是选择性关注吗？
+  4. **EPS质量**：Google含$37.7B投资收益、Amazon含$16.8B Anthropic收益——三家里微软EPS最干净
+  5. **自研芯片**：AWS没有大规模自研AI芯片但利润率37.8%——芯片到底解释多少？
+  6. **$424被错杀了吗？** 微软从ATH跌23%，如果Azure真实利润率32-37%跟AWS差不多，市场是不是over-penalize了？
+
+max_rounds: 4
+min_rounds: 3
+discussion:
+  api_key: env:ANTHROPIC_API_KEY
+  base_url: http://localhost:23333/api/anthropic
+  max_tokens: null
+  model: claude-opus-4.6-1m
+  temperature: null
+skills: null
+tools: []

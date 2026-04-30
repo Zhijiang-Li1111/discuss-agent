@@ -1,0 +1,206 @@
+agents:
+- disable_tools: []
+  extra_tools: []
+  name: 宏观策略分析师
+  skills: []
+  system_prompt: |
+    你是一个宏观策略分析师，专注科技巨头的资本周期和估值框架。
+
+    ## 你的核心视角
+    - 三巨头横向对比：为什么花差不多的钱，但市场给的溢价差这么多？
+    - PEG 框架：MSFT 3-4x vs GOOGL 1.0x vs AMZN 1.3x——微软贵在哪？
+    - 利润率方向是定价的核心：方向比绝对值重要
+    - 资金轮动：机构从MSFT流向GOOGL/AMZN的逻辑
+    - 每家的AI变现层级和对应的利润结构
+
+    ## 你的风格
+    从 top-down 看问题。"三家都在砸钱，但Google的钱在变成利润，微软的钱在吃利润。"
+
+- disable_tools: []
+  extra_tools: []
+  name: 会计分析师
+  skills: []
+  system_prompt: |
+    你是一个 CPA 出身的财报分析师，专注利润质量和现金流真实性。拆数字到最细。
+
+    ## 你的核心关注
+    - 三家的云业务利润率横向对比和趋势
+    - CapEx强度（CapEx/营收比）和FCF转化率
+    - EPS质量：Google $5.11含$2.35一次性收益，Amazon $2.78含$168亿Anthropic投资收益——真实盈利是多少？
+    - 折旧/摊销对未来利润的影响——谁的折旧墙最大？
+    - 微软RPO $627B vs Google云backlog $462B——含金量对比
+
+    ## 你的风格
+    "不要给我headline数字，给我adjusted的。Google EPS $5.11刨掉一次性是$2.76，Amazon $2.78刨掉Anthropic是多少？"
+
+- disable_tools: []
+  extra_tools: []
+  name: AI产业分析师
+  skills: []
+  system_prompt: |
+    你是一个 AI 产业分析师，从AI商业化和竞争格局角度看三巨头。
+
+    ## 你的核心关注
+    - 三种AI变现模式：Google（广告优化+云）vs 微软（Azure算力+Copilot SaaS）vs Amazon（Bedrock平台+自研芯片）
+    - 自研芯片优势：Google TPU vs Amazon Trainium vs 微软Maya/Cobalt——谁的成本结构最优？
+    - 为什么Google Cloud +63%增速远超Azure +40%和AWS +28%？
+    - AI对搜索广告的增益（Google AI Overviews CTR +12%）——这种变现路径微软没有
+    - Bedrock 12.5万客户 vs Azure Foundry vs Google Vertex——谁的平台更开放、更sticky？
+    - inference通缩对三家的影响谁最大？
+
+    ## 你的风格
+    从产业链和技术路线图出发。"Google和Amazon都有自研芯片降成本，微软主要靠NVIDIA——这就是利润率方向不同的根本原因。"
+
+- disable_tools: []
+  extra_tools: []
+  name: 市场微观结构分析师
+  skills: []
+  system_prompt: |
+    你是一个专注价格行为和资金流向的分析师。
+
+    ## 你的核心关注
+    - 三家盘后走势对比：Google +6-7%、Amazon +2.7%波动、微软先+5%后-4%再回平——说明什么？
+    - 过去12个月资金轮动：GOOGL +118%、AMZN +38%、MSFT +10%——机构在做什么？
+    - 估值重定价：Google从"AI laggard"到"AI winner"的re-rating vs 微软从"AI leader"到"AI spender"的de-rating
+    - 内部人行为：Nadella抛$75M，盖茨减持65%——Google/Amazon内部人在做什么？
+    - 如果你只能在三家里选一家配置，选谁？
+
+    ## 你的风格
+    从价格行为倒推市场心理。"市场在投票：同样砸$190B，它选择跟Google走，不跟微软走。"
+
+context: {}
+context_builder: null
+host:
+  api_key: null
+  base_url: null
+  convergence_prompt: |
+    检查讨论是否收敛。满足以下条件返回 CONVERGED：
+    1. 三家的核心差异已被充分辩论（利润率方向、AI变现模式、估值框架）
+    2. 各方至少回应了一次对方核心论据
+    3. "为什么微软垫底"已有清晰共识或明确分歧
+    4. 已完成至少 min_rounds 轮
+
+    如果仍有重要分歧未充分展开，返回 CONTINUE 并指出方向。
+  max_tokens: null
+  model: null
+  summary_prompt: |
+    基于以上讨论，输出三巨头（微软/Google/Amazon）AI云业务横向对比分析报告。
+
+    核心问题：为什么三家都在砸$180-200B/年建AI基础设施，但市场给的估值差距如此悬殊？
+
+    必须包含：
+    1. **三家AI变现模式对比**：谁的路径最优、利润率最高、最可持续？
+    2. **利润率方向是核心**：为什么Google/Amazon在改善而微软在恶化？根本原因是什么？
+    3. **自研芯片 vs 依赖NVIDIA**：对成本结构和利润率的影响
+    4. **CapEx回报分析**：三家的投资效率谁最高？
+    5. **估值框架**：PEG、earnings yield 对比，谁最便宜，谁最贵？
+    6. **为什么微软Mag 7垫底**：一句话回答
+    7. **关键风险**：每家各自的核心风险
+    8. **四方共识与分歧**
+    9. **如果只能选一家配置，选谁？为什么？**
+  temperature: null
+limitation: |
+  ## 核心问题
+  三巨头（微软/Google/Amazon）同时发布财报，都在大举投资AI基础设施（$180-200B/年），
+  但过去12个月股价表现天差地别：GOOGL +118%、AMZN +38-47%、MSFT +10.6%。
+  为什么？市场在 price in 什么？
+
+  ## 微软 FY2026 Q3（2026年4月29日发布）
+
+  ### 核心数据
+  - 营收: $82.9B, +18% YoY — beat $81.4B
+  - EPS: $4.27, +23% — beat $4.06
+  - Azure: +40% (CC +39%)
+  - AI年化: $37B, +123%
+  - 云收入: $54.5B, +29%
+  - 云毛利率: 66%, YoY下降
+  - 公司毛利率: 68%, 2022以来最低
+  - Q4云毛利率指引: ~64%
+  - CapEx: $31.9B (+49% YoY)
+  - CY2026 CapEx指引: ~$190B（含$25B涨价）
+  - FCF: $15.8B
+  - RPO: $627B, +99%（含OpenAI ~45%；剔除OpenAI +26%）
+  - Bookings 剔除OpenAI: +7%
+  - Copilot: 2000万付费席位, +250% YoY
+  - 盘后: 先+5%($446) → 砸到-4%($406) → 回$425平盘
+  - 过去12个月: +10.6%, Mag 7垫底
+  - PEG: 3-4x
+
+  ## Google (Alphabet) Q1 2026（2026年4月29日发布）
+
+  ### 核心数据
+  - 营收: $109.9B, +22% YoY — beat $107.2B
+  - EPS: $5.11（含$2.35一次性投资收益；调整后~$2.76）— beat
+  - 经营利润: $39.7B, 经营利润率 36.1%（↑YoY）
+  - Google Cloud: $20.0B, **+63% YoY**
+  - Cloud经营利润率: **32.9%**（去年17.8%，5年前-47%）
+  - Cloud经营利润: $6.6B
+  - Cloud backlog: $462B+
+  - 搜索广告: $60.4B, +19%
+  - YouTube: $9.9B, +11%
+  - AI Overviews CTR提升: +12%
+  - Workspace Gemini seats: 14M+
+  - 付费订阅总计: 3.5亿
+  - CapEx: $35.7B
+  - FY2026 CapEx指引: $180-190B（上调）
+  - FCF: $10.1B
+  - 盘后: +6-7%
+  - 过去12个月: **+118%**
+  - PEG: ~1.0x
+  - 自研芯片: TPU（大规模部署，成本优势显著）
+
+  ### Cloud利润率历程
+  - 2020: -47%
+  - 2023: +5%
+  - Q4 2025: 30%
+  - Q1 2026: **33%**
+
+  ## Amazon Q1 2026（2026年4月29日发布）
+
+  ### 核心数据
+  - 营收: $181.5B, +17% YoY — beat $177.3B
+  - EPS: $2.78（含$168亿Anthropic投资收益；需调整）— beat $1.63-1.65
+  - 经营利润率: **13.1%**（历史新高）
+  - AWS: $37.6B, **+28% YoY**（15个季度最快增速）
+  - AWS经营利润: $14.2B
+  - AWS经营利润率: **37.7%**（去年33%）
+  - AWS年化: $1500亿
+  - AI年化收入: $15B+（AWS中约10%）
+  - 自研芯片: Trainium/Inferentia/Graviton年化$20B+, 环比+40%
+  - Bedrock: 12.5万客户, 支出环比+170%
+  - 广告: $172.4B, +24%
+  - CapEx: $44.2B
+  - 全年CapEx指引: ~$200B
+  - FCF: $1.2B（去年$25.9B，CapEx吃掉）
+  - 盘后: +2.7%（波动，一度-2%再反弹）
+  - 过去12个月: +38-47%
+  - PEG: ~1.3x
+  - 自研芯片: Trainium2售罄，Trainium3出货中，比同级GPU性价比高30%+
+
+  ### AWS利润率历程
+  - Q2 2025: 33%
+  - Q4 2025: 35%
+  - Q1 2026: **37.7%**（持续扩张）
+
+  ## 关键矛盾点（必须辩论）
+
+  1. **利润率方向分化**：Google Cloud 从-47%→33%，AWS从33%→38%，微软云从72%→64%——为什么方向完全相反？是结构性的还是周期位置不同？
+  2. **自研芯片差距**：Google TPU、Amazon Trainium 都在降成本，微软主要靠NVIDIA和刚起步的Maya/Cobalt——这是利润率差异的根本原因吗？
+  3. **AI变现层级**：Google靠广告优化（CPM提升，立竿见影），Amazon靠平台+芯片，微软靠算力批发+Copilot SaaS——谁的商业模式最优？
+  4. **CapEx效率**：三家都花$180-200B，但Google的钱转化为利润率扩张，微软的钱转化为利润率收缩——投资效率的差异在哪？
+  5. **估值合理性**：MSFT PEG 3-4x、GOOGL PEG 1.0x、AMZN PEG 1.3x——微软贵了多少？应该交易在多少PEG？
+  6. **Cloud增速**：Google Cloud +63%远超Azure +40%和AWS +28%——这是基数效应还是真正在抢份额？
+  7. **EPS质量**：三家都有一次性项目（Google $2.35投资收益、Amazon $168亿Anthropic、微软OpenAI损失从$583M→$14M）——调整后谁的EPS最干净？
+  8. **Bookings健康度**：微软剔除OpenAI仅+7%，Google Cloud backlog $462B，AWS backlog未披露——谁的增量需求最强？
+
+max_rounds: 4
+min_rounds: 3
+discussion:
+  api_key: env:ANTHROPIC_API_KEY
+  base_url: http://localhost:23333/api/anthropic
+  max_tokens: null
+  model: claude-opus-4.6-1m
+  temperature: null
+skills: null
+tools:
+- path: discuss_tools.web_search.WebSearchTools

@@ -1,0 +1,231 @@
+agents:
+- disable_tools: []
+  extra_tools: []
+  name: 宏观策略分析师
+  skills: []
+  system_prompt: |
+    你是一个宏观策略分析师，专注科技巨头的资本周期和估值框架。你从"市场为什么不买账"的角度出发。
+
+    ## 你的核心视角
+    - AI CapEx 军备竞赛的可持续性——$1900亿/年的资本支出，回报要多久？
+    - 估值框架：当 FCF yield 被 CapEx 压缩，PE/FCF 还能用吗？
+    - Mag 7 内部轮动：MSFT 过去12个月 +10.6% 垫底，GOOGL +118%，为什么？
+    - 关税/宏观对企业 IT 支出的影响
+    - 利率环境对 duration asset（高估值科技股）的压制
+
+    ## 你的风格
+    从 top-down 看问题。"Azure 增速很好，但市场不给溢价，因为估值已经 price in 了增长，剩下的只有风险。"
+
+- disable_tools: []
+  extra_tools: []
+  name: 会计分析师
+  skills: []
+  system_prompt: |
+    你是一个 CPA 出身的财报分析师，专注利润质量和现金流真实性。你不看故事，只看数字。
+
+    ## 你的核心关注
+    - 毛利率从 72% 降到 68%，趋势是什么？Q4 指引 64%——AI 越卖越薄利？
+    - CapEx $31.9B vs FCF $15.8B——钱花出去能赚回来吗？
+    - RPO $627B 翻倍——但其中 45% 是 OpenAI，这算真需求吗？
+    - Commercial bookings 含 OpenAI 后 -46%——剔除 OpenAI 只有 +7%
+    - 短周期资产（GPU/CPU）占 CapEx 2/3——折旧加速对未来利润的影响
+    - OpenAI 投资损失从 $583M 降到 $14M——怎么做到的？会计处理变了？
+
+    ## 你的风格
+    拆数字到最细。追问："$627B RPO 里，12个月内能确认多少？加速的是 OpenAI 的合同还是真正的企业客户？"
+
+- disable_tools: []
+  extra_tools: []
+  name: AI产业分析师
+  skills: []
+  system_prompt: |
+    你是一个 AI 产业深度分析师，专门研究 AI 基础设施和应用层的商业化。
+
+    ## 你的核心关注
+    - Azure AI 贡献 13pp——比上季度的 16pp 少了，AI 增速在放缓？
+    - AI 年化 $37B +123%——听着很牛，但跟 $1900 亿 CapEx 比呢？投资回报周期？
+    - Copilot 2000万付费席位，250% YoY——但 ARPU 是多少？$30/月/席位？贡献营收多少？
+    - GitHub Copilot 转 usage-based pricing——是好事还是说不好按席位收费了？
+    - "需求超过供给"——是真的还是人为制造稀缺？
+    - DeepSeek / 开源模型冲击：inference 成本在暴跌，微软的 AI 定价权能维持吗？
+    - Foundry 多模型策略（OpenAI + Anthropic + 开源）——说明客户不锁定单一供应商
+
+    ## 你的风格
+    从产业链和竞争格局出发。"AI 年化 $37B 很亮眼，但如果 inference 成本每年降 50-70%，那 $37B 明年可能只值 $15B 的今天算力。"
+
+- disable_tools: []
+  extra_tools: []
+  name: 市场微观结构分析师
+  skills: []
+  system_prompt: |
+    你是一个专注价格行为和资金流向的分析师。你从"盘后先涨后跌再涨"这个价格模式出发。
+
+    ## 你的核心关注
+    - 4:00pm 冲 +5% 到 $446 → 4:05pm 砸到 $406（-4.3%）→ 6:00pm 回到 $425——这个走势说明什么？
+    - 算法交易 vs 人类交易员的博弈：算法看 headline beat 先买，细看 CapEx 和利润率后砸
+    - 盘后流动性薄——是真的市场分歧还是放大了噪音？
+    - 过去一年 MSFT Mag 7 垫底——机构在减仓吗？
+    - Nadella 去年抛 $75M+，盖茨基金会减持 65%——内部人在卖
+    - 当前 $424（盘后），分析师均价 $579-595——35-40% 上行空间，为什么市场不理？
+    - 是不是"估值陷阱"？beat every quarter 但股价不涨
+
+    ## 你的风格
+    从价格行为倒推市场心理。"市场不是不知道 Azure 39%，而是在问：39% 的增速值不值 $190B 的 CapEx？"
+
+context: {}
+context_builder: null
+host:
+  api_key: null
+  base_url: null
+  convergence_prompt: |
+    检查讨论是否收敛。满足以下条件返回 CONVERGED：
+    1. 四个核心维度都已辩论（估值/利润质量/AI产业/市场行为）
+    2. 各方至少回应了一次对方核心论据
+    3. 核心问题已有清晰共识或明确分歧
+    4. 已完成至少 min_rounds 轮
+
+    如果仍有重要分歧未充分展开，返回 CONTINUE 并指出方向。
+  max_tokens: null
+  model: null
+  summary_prompt: |
+    基于以上讨论，输出微软(MSFT) FY2026 Q3 财报深度分析报告。
+
+    核心问题：为什么财报全线 beat 但市场不买账？先涨后跌再涨的盘后走势说明了什么？
+
+    必须包含：
+    1. **盘后走势归因**：4:00冲+5% → 4:05砸到-4% → 6:00回到平盘，每个阶段的驱动因素
+    2. **市场真正的担忧是什么**：不是 Azure 不好，而是什么？
+    3. **AI CapEx 回报分析**：$1900亿/年的投资，$37B AI收入，数学能算过来吗？
+    4. **利润质量判定**：毛利率从 72% → 68% → 64%(Q4指引)，趋势是什么？
+    5. **RPO 含金量**：$627B 里 OpenAI 占多少？真正的企业需求有多强？
+    6. **竞争格局**：为什么 MSFT 过去12个月 Mag 7 垫底？
+    7. **关键风险清单**
+    8. **四方共识与分歧**
+    9. **结论：是被错杀还是估值合理？**
+  temperature: null
+limitation: |
+  ## 核心问题
+  微软 FY2026 Q3 财报（2026年4月29日盘后发布）全线 beat，但盘后走势诡异：
+  先冲 +5%（$446），5分钟内砸到 -4.3%（$406），然后电话会期间又拉回平盘（$425）。
+  过去12个月 MSFT +10.6%，Mag 7 垫底（GOOGL +118%，NVDA +96%）。
+  市场到底在担忧什么？
+
+  ## FY2026 Q3 财报数据
+
+  ### 整体
+  - 营收: $82.9B, +18% YoY（CC +15%）— beat 预期 $81.4B
+  - EPS: $4.27, +23% YoY — beat 预期 $4.06
+  - 营业利润: $38.4B, +20%
+  - 净利润: $31.8B, +23%
+  - 毛利率: 68%（YoY 下降，2022以来最低区间）
+  - 经营利润率: 46%
+  - 经营现金流: $46.7B, +26%
+  - 自由现金流: $15.8B（CapEx $31.9B 吃掉大部分）
+  - CapEx: $31.9B（同比+49%），2/3 是短周期资产（GPU/CPU）
+  - 股东回报: $10.2B
+
+  ### Microsoft Cloud
+  - 收入: $54.5B, +29%（CC +25%）
+  - 云毛利率: 66%（YoY 下降）
+  - RPO: $627B, +99% YoY（含 OpenAI）
+  - 剔除 OpenAI 后 RPO +26%
+
+  ### 分部
+  - 智能云: $34.7B, +30%（CC +28%）
+    - Azure: +40%（CC +39%）
+    - AI 贡献 Azure 增速 13pp
+  - 生产力与商业: $35.0B, +17%（CC +13%）
+    - M365 Commercial Cloud: +19%（CC +15%）
+    - M365 Consumer Cloud: +33%（CC +29%）
+    - LinkedIn: +12%（CC +9%）
+    - Dynamics 365: +22%（CC +17%）
+  - 个人计算: $13.2B, -1%（CC -3%）
+    - Windows OEM: -2%
+    - Xbox: -5%
+    - Search ads ex-TAC: +12%
+
+  ### AI 业务
+  - AI 年化收入: $37B, +123% YoY
+  - Copilot 付费席位: 2000万+, +250% YoY
+  - GitHub Copilot: 14万组织, 企业订阅 3x YoY
+  - Copilot 周活跃度 = Outlook 水平
+  - Agent mode 已成为 Word/Excel/PPT 默认体验
+
+  ### 商业订阅
+  - Commercial bookings 剔除 OpenAI: +7%
+  - Commercial bookings 含 OpenAI: -46%
+  - RPO $627B 中约 25% 在未来12个月确认（+39% YoY）
+
+  ### Q4 FY2026 指引
+  - 营收: $86.7-87.8B（共识 $87.53B，略 miss）
+  - Azure: 39-40% CC（共识 ~37%，beat）
+  - 生产力板块: $37.0-37.3B
+  - 智能云: $37.95-38.25B
+  - 个人计算: $11.75-12.25B
+  - 云毛利率: ~64%（继续下降）
+  - 经营利润率: ~44%（Q3 46%，下降）
+  - CapEx: 超 $40B
+  - CY2026 CapEx: ~$1900亿（含 $250 亿涨价因素）
+  - 含 ~$9 亿一次性退休计划费用
+  - Q4 Windows OEM: 下降 high teens
+
+  ### FY2027 展望
+  - 收入和利润双位数增长
+  - OpEx 增速 mid-to-high single digits
+  - 人员继续下降
+  - Azure 下半年日历年温和加速
+  - 产能限制至少持续到 2026 年底
+
+  ### OpenAI 协议更新
+  - IP 对微软免费使用（royalty-free）到 2032
+  - 收入分成持续到 2030
+  - 消除微软给 OpenAI 的分成
+
+  ### 盘后走势
+  - 收盘价: $424.46
+  - 盘后高点: $446.23 (+5.13%)
+  - 盘后低点: $406.28 (-4.28%)
+  - 盘后收回: ~$425 (平盘)
+
+  ### 过去一年走势
+  - 2025年7月 ATH $555（Q4 FY2025 beat 后）
+  - 2026年3月低点 $356（-36% from ATH）
+  - 当前 ~$424
+  - Mag 7 过去12个月回报垫底：+10.6%
+  - 分析师均价 $579-595，隐含 +35-40% 上行
+
+  ### 内部人减持
+  - Nadella 2025年9月抛 $75M+
+  - 盖茨基金会减持 ~65% MSFT 持仓（~$88亿）
+
+  ### 电话会关键原话
+  - Nadella: "AI business surpassed $37B ARR, up 123%"
+  - Nadella: "Agent mode in Excel 之前不太行，直到模型能力到位后突然就行了——你必须为这些机会准备好产能"
+  - Amy Hood: "需求持续超过供给，产能限制至少持续到2026年底"
+  - Amy Hood: "AI 业务利润率远好于当年云转型同期"
+  - Amy Hood on OpenAI: "revenue share 持续到 2030，IP royalty-free，消除了我们给他们的分成"
+  - Amy Hood: CY2026 CapEx $190B 含 $25B 涨价因素
+  - Amy Hood: "Azure growth to show modest acceleration in H2 calendar year"
+  - Amy Hood: RPO "over $600B of revenue that we still need to deliver"
+
+  ## 关键矛盾点（必须辩论）
+
+  1. **CapEx 回报数学**：AI 年化 $37B 收入 vs $1900亿/年 CapEx——投资回报期多长？能算过来吗？
+  2. **毛利率趋势**：从 72%（FY2023）→ 68%（Q3）→ 64%（Q4指引）——AI 越卖越薄利是结构性的吗？
+  3. **RPO 含金量**：$627B +99%，但 45% 是 OpenAI——剔除后只有 +26%，这算超级增长吗？
+  4. **Azure AI 贡献下降**：Q2 贡献 16pp → Q3 贡献 13pp——AI 增速在放缓？
+  5. **为什么 Mag 7 垫底**：每季度都 beat，Azure 39-40%，但过去12个月 +10.6% vs GOOGL +118%——市场在 price in 什么风险？
+  6. **内部人减持**：Nadella $75M + 盖茨 $88B——他们知道什么市场不知道的？
+  7. **盘后走势的信号**：先涨后跌再涨——是算法噪音还是真实分歧？
+  8. **seat + consumption 模式转型**：Amy Hood 说将来不只卖 seat 还卖 usage——这对利润率意味着什么？
+
+discussion:
+  model: claude-opus-4.6-1m
+  api_key: sk-placeholder
+  base_url: http://localhost:23333/api/anthropic
+  max_rounds: 4
+  min_rounds: 3
+skills: null
+tools:
+- path: discuss_tools.research_search.ResearchSearchTools
+- path: discuss_tools.web_search.WebSearchTools

@@ -1,0 +1,191 @@
+agents:
+- disable_tools: []
+  extra_tools: []
+  name: 财报分析师
+  skills: []
+  system_prompt: |
+    你是一个资深科技行业财报分析师。你的任务是审核一篇准备发布的文章，看看结论是否成立、有没有需要修改的地方。
+
+    你可以使用研报搜索工具来验证文章中的观点是否与机构研报一致或矛盾。
+
+    ## 重要：工具使用优先级
+    - **research_search（研报库）是你的首选工具**——这是清洗过的专业数据，准确性最高
+    - web_search 只做补充，准确性远不如研报库
+
+    ## 审核要点
+    1. 文章的核心结论是否成立？
+    2. 推导过程是否严谨？（特别是Azure利润率反推和芯片传导链）
+    3. 有没有遗漏重要的研报观点？
+    4. 有没有与主流机构研报矛盾的地方？
+    5. 数字口径是否一致？
+    6. 叙事是否平衡（多空兼顾）？
+
+- disable_tools: []
+  extra_tools: []
+  name: 投资策略分析师
+  skills: []
+  system_prompt: |
+    你是一个买方投资策略分析师。你从"能不能据此做投资决策"的角度审核这篇文章。
+
+    ## 重要：工具使用优先级
+    - **research_search（研报库）是你的首选工具**
+    - web_search 只做补充
+
+    ## 审核要点
+    1. 文章给的交易框架（Q4 Cloud GM 65%/64%/63%三个情景）是否合理？
+    2. "好公司，错位置，缺催化"——这个结论是不是太保守了？有没有被忽视的催化剂？
+    3. 估值分析是否充分？PEG对比是否公允？
+    4. 三家排序（AMZN#1, GOOGL#2, MSFT#3）是不是已经是后视镜？
+    5. 有没有文章没提到但研报里有的重要风险或机会？
+
+- disable_tools: []
+  extra_tools: []
+  name: 文字编辑
+  skills: []
+  system_prompt: |
+    你是一个资深财经自媒体编辑。你从"长桥社区读者能不能看懂、会不会觉得有价值"的角度审核。
+
+    ## 审核要点
+    1. 非金融专业的投资者能看懂吗？专业术语解释够不够？
+    2. 文章节奏和结构是否流畅？
+    3. 有没有AI味道？有没有模板化的痕迹？
+    4. 标题吸不吸引人？
+    5. 哪些段落可以删掉（读者不关心的）？
+    6. 哪些地方需要加例子或比喻让普通人理解？
+
+context: {}
+context_builder: null
+host:
+  api_key: null
+  base_url: null
+  convergence_prompt: |
+    检查讨论是否收敛。三方都对文章质量给出了明确判断即可CONVERGED。
+  max_tokens: null
+  model: null
+  summary_prompt: |
+    基于三方审核意见，输出：
+    1. 文章总评分（1-10）
+    2. 必须修改的地方（列表）
+    3. 建议修改的地方（列表）
+    4. 可以保留的亮点
+    5. 最终判断：能不能发？
+  temperature: null
+limitation: |
+  ## 待审核文章
+
+  # 微软财报：全线Beat，市场不买账
+
+  ## 盘后发生了什么
+
+  美东4点财报出来涨5%到$446。5分钟砸到$406，跌4%。电话会之后爬回$425，平盘。
+
+  **涨**：营收$82.9B超预期约$1.5B，EPS $4.27超预期约$0.21，Azure 40%（固定汇率39%）远超预期37%。
+
+  **砸**：资本开支单季$30.9B（含融资租赁约$31.9B）。Microsoft Cloud毛利率降至66%，Q4指引约64%。Q4营收指引略低于共识。
+
+  **回来**：电话会上Azure Q4指引39-40%（超预期），管理层说需求超过供给，AI利润率好于预期，OpenAI新协议取消分成。
+
+  ## 两个核心关注点
+
+  **Azure增速：超预期，在加速。** 本季39%（固定汇率），Q4指引39-40%，高于街上预期37%。没问题。
+
+  **Copilot：增长快，变现不透明。** 付费席位2000万+，同比+250%。但没披露ARPU和营收贡献。M365商业席位4亿+，渗透率约5%。市场没法给一个看不见收入数字的产品定价。
+
+  ## 三家放一起看
+
+  昨晚Google和Amazon也发了财报。三家都在大举投资AI基础设施。
+
+  ### 先说口径
+
+  三家的"云"定义不一样，直接比数字会误导：
+
+  - **微软Intelligent Cloud**（Azure + Server Products + GitHub）：segment经营利润率 **~40%**
+  - **AWS**（纯云服务）：segment经营利润率 **37.8%**
+  - **Google Cloud**（GCP + Workspace）：segment经营利润率 **~33%**
+
+  表面看微软最高。但微软IC里有Server Products（传统软件授权）在拉高均值。Azure本身的利润率是多少？微软不披露，但可以做一个粗略推算。
+
+  ### Azure到底赚多少？一个简单的反推
+
+  IC segment年化营收约$139B，经营利润率约40%，经营利润约$56B。
+
+  其中Server Products + Enterprise Services（"Legacy"业务）年化约$30B。这部分的利润率取决于假设——传统软件授权利润率很高，但Enterprise Services（咨询、部署）利润率低。
+
+  做一个敏感性分析：
+
+  | Legacy经营利润率假设 | 隐含Azure经营利润率 |
+  |---|---|
+  | 65%（偏高假设） | ~32% |
+  | 55%（居中假设） | ~35% |
+  | 50%（偏低假设） | ~37% |
+
+  **结论：Azure真实经营利润率大概在32-37%之间。** 跟AWS的37.8%差距不大。IC整体的40%被高利润传统业务拉高了。
+
+  三家纯云/AI业务的利润率可能比表面数字互相接近得多。
+
+  ### 但方向确实不一样
+
+  过去5个季度：
+  - **Google Cloud**：从17.8%飙升到30%+
+  - **AWS**：33-39%区间，整体向上
+  - **微软IC**：从~44%降到~40%
+
+  Microsoft Cloud毛利率（跨板块指标）：从约72%降到66%，Q4指引64%。管理层归因于AI基础设施投资。
+
+  **市场定价方向，不定价绝对值。**
+
+  ### 为什么方向不同？
+
+  市场流行的解释是自研芯片。但这个因素被过度放大了。
+
+  一个传导链：假设自研芯片比NVIDIA有50%的TCO优势。芯片成本占云服务总成本的40-50%。50%芯片优势转化为总成本节省约20%。AI收入只占segment收入的一部分，最终传导到segment利润率可能只有3-5个百分点。而segment成分差异可以解释8-10个百分点。
+
+  AWS的AI训练大量依赖NVIDIA，但利润率仍然最稳。Google Cloud从亏损起步每一点规模效应都是正方向。微软是从高利润SaaS向低利润AI算力mix shift。
+
+  ### 估值
+
+  Google PEG约1倍，Amazon约1.3倍，微软3-4倍。投行排序：AMZN#1 > GOOGL#2 > MSFT#3。Goldman砍PT到$450，但MS维持$650——多空分歧巨大。
+
+  ## Bookings和RPO怎么看？
+
+  剔除OpenAI后bookings只有+7%。但RPO达到$627B，同比+99%。剔除OpenAI后RPO增速约+26%——健康但不爆炸。两个数字矛盾可能指向合同期限拉长。
+
+  ## 结论
+
+  $424对应约27倍forward PE。Goldman $450只有6%上行。MS $650需要三个拐点同时发生。
+
+  **下一个催化剂：Q4 Cloud毛利率。** 65%=减速信号好，64%=横盘，63%以下=确认加速恶化。
+
+  好公司，错位置，缺催化。等数据。
+
+  ---
+
+  ## 背景信息（审核时参考，不在文章中）
+
+  ### 已知的口径问题和修正
+  - RPO是$627B/+99%（含OpenAI），剔除OpenAI后+26%
+  - CapEx PP&E口径$30.9B，含融资租赁约$31.9B
+  - IC segment OP margin ~40%是含Server Products等高利润业务的混合值
+  - Microsoft Cloud GM 66%是跨板块指标（含M365/Dynamics/LinkedIn云部分）
+  - 三家segment定义不同：IC含传统软件，Google Cloud含Workspace，AWS最"纯"
+  - 微软不披露Azure单独利润率
+  - 芯片TCO传导到利润率有衰减，最终影响约3-5pp而非市场说的决定性
+  - "利润率方向分化"已是华尔街共识，6-9个月前是contrarian
+
+  ### 数据核查结果
+  - 微软官方确认：营收$82.9B ✅、EPS $4.27 ✅、Azure +40%(CC 39%) ✅、Cloud GM 66% ✅、IC OP margin ~40% ✅
+  - RPO官方确认：$627B +99% ✅
+  - Google/Amazon数字来自Copilot搜索，未直接核实官方页面（被反爬阻断）
+
+max_rounds: 3
+min_rounds: 2
+discussion:
+  api_key: env:ANTHROPIC_API_KEY
+  base_url: http://localhost:23333/api/anthropic
+  max_tokens: null
+  model: claude-opus-4.6-1m
+  temperature: null
+skills: null
+tools:
+- path: discuss_tools.research_search.ResearchSearchTools
+- path: discuss_tools.web_search.WebSearchTools

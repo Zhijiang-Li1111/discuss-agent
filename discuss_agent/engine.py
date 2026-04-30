@@ -262,7 +262,7 @@ class DiscussionEngine:
             others = [e for e in expressions if e.agent_name != agent.name]
             _SUMMARY_LEN = 800
             others_summary = "\n\n".join(
-                f"[{e.agent_name}] {e.content[:_SUMMARY_LEN]}..."
+                f"[{e.agent_name}] {e.content[:_SUMMARY_LEN]}{'...' if len(e.content) > _SUMMARY_LEN else ''}"
                 for e in others
             )
 
@@ -289,7 +289,8 @@ class DiscussionEngine:
                 f"{limitation_prefix}"
                 f"{guidance_prefix}"
                 f"以下是其他讨论者在第{round_num}轮的观点：\n\n"
-                f"{others_text}\n\n"
+                f"{others_summary}\n\n"
+                f"{archive_hint}"
                 f"请仔细审视上述观点，找出其中的薄弱环节并提出有针对性的质疑。"
                 f"有价值的质疑应该做到：\n"
                 f"- 指出论证中的逻辑漏洞、数据缺失或隐含假设\n"
@@ -315,8 +316,8 @@ class DiscussionEngine:
     # ------------------------------------------------------------------
 
     async def _host_judge(self, history: list[RoundRecord]) -> dict:
-        logger.info("=== HOST JUDGE (convergence check) ===")
         """Host judges convergence. Returns parsed JSON or default not-converged."""
+        logger.info("=== HOST JUDGE (convergence check) ===")
         history_text = self._format_history(history)
         prompt = (
             f"以下是到目前为止的完整讨论记录：\n\n{history_text}\n\n"
@@ -360,8 +361,8 @@ class DiscussionEngine:
     # ------------------------------------------------------------------
 
     async def _host_summarize(self, history: list[RoundRecord]) -> str:
-        logger.info("=== HOST SUMMARIZE (generating final report) ===")
         """Host generates final summary after convergence."""
+        logger.info("=== HOST SUMMARIZE (generating final report) ===")
         host_model_config = self._config.host.resolve_model(self._config.model_config)
         summary_agent = Agent(
             name="Host-Summary",
