@@ -70,34 +70,41 @@ agent_a_messages = [
 
 ## 程序推送给 Agent 的增量更新格式
 
-推送只告诉 agent **发生了什么变化**，不告诉谁说了什么。Agent 想看具体内容自己去 grep + read。
+**OPEN claims 全文直接放 prompt，CLOSED 只通知状态变化。**
+
+随着讨论推进，OPEN claims 越来越少，prompt 自然越来越短。
 
 ```markdown
 ## 第{N}轮更新
 
-以下 CLAIM 有变化：
+状态变化：
+- [已关闭] CLAIM:牧原成本优势 — CLOSED:共识
+- [新增] CLAIM:饲料产量下降
 
-1. [增量讨论] CLAIM:能繁去化进度 — 有新的反驳和补充
-2. [已关闭] CLAIM:牧原成本优势 — CLOSED:共识
-3. [新增] CLAIM:饲料产量下降 — 新论点
+以下是当前所有 OPEN claims 的完整讨论内容：
 
-当前所有 OPEN claims:
-- CLAIM:能繁去化进度
-- CLAIM:饲料产量下降
+##CLAIM:能繁去化进度 [OPEN]##
+[FROM:养殖产业分析师 @R1] 当前3904万头，目标3650万...
+  [REBUTTAL FROM:财务审计分析师 @R1] 数据需交叉验证...
+  [RESPONSE FROM:养殖产业分析师 @R2] 农业农村部月报第X页...
+  [ACCEPT FROM:财务审计分析师 @R2] 确认数据来源可靠
 
-主文件路径: {claims_file_path}
+##CLAIM:饲料产量下降 [OPEN]##
+[FROM:侧面验证分析师 @R2] Q1猪饲料产量同比-8%...
 
 ## 你的任务
-1. 用 grep_file('{claims_file_path}', 'CLAIM:能繁去化') 查看有增量讨论的论点
-2. 用 read_file 读完整内容
-3. 对每个 OPEN claim 回应：
-   - [REBUTTAL TO:关键词] 反驳 + 证据
-   - [ACCEPT TO:关键词] 接受 + 理由
-   - [NEW_CLAIM:关键词] 提出新论点
-4. 可以随时用 research_search 或 web_search 搜索证据
+对每个 OPEN claim，你必须回应（除非你是提出者且没人反驳）：
+- [REBUTTAL TO:关键词] 反驳 + 证据
+- [ACCEPT TO:关键词] 接受 + 理由
+- [NEW_CLAIM:关键词] 提出新论点
+可以随时用 research_search 或 web_search 搜索证据。
 ```
 
-**设计原则：程序只推变化类型（增量/关闭/新增），不推具体内容。Agent 按需读取。**
+**设计原则：**
+- OPEN claims 全文进 prompt（含 FROM 标签，知道谁说了什么）
+- CLOSED claims 不进 prompt（只通知关闭了）
+- grep/read 保留给特殊需求（如想看 CLOSED 论点的完整讨论过程）
+- 随着 CLOSE 增多，prompt 自然缩短
 
 ## 主文件 claims.md 格式
 
