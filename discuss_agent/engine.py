@@ -259,8 +259,11 @@ class DiscussionEngine:
         async def call_agent(agent: Agent) -> AgentUtterance | None:
             # Only show other agents' expressions
             others = [e for e in expressions if e.agent_name != agent.name]
+            # Truncate each expression to avoid overly long prompts
+            _MAX_CHARS_PER_AGENT = 3000
             others_text = "\n\n".join(
-                f"[{e.agent_name}] {e.content}" for e in others
+                f"[{e.agent_name}] {e.content[:_MAX_CHARS_PER_AGENT]}{'... (截断，完整版请用工具搜索验证)' if len(e.content) > _MAX_CHARS_PER_AGENT else ''}"
+                for e in others
             )
 
             limitation_prefix = ""
