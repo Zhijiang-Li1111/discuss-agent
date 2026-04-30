@@ -98,7 +98,8 @@ class AgentConversation:
         self.messages.append({"role": "user", "content": user_message})
 
         for iteration in range(_MAX_TOOL_ITERATIONS):
-            response = await self._client.messages.create(**self._build_api_kwargs())
+            kwargs = self._build_api_kwargs()
+            response = await self._client.messages.create(**kwargs)
 
             # Store the raw content blocks as the assistant message
             # (Anthropic API requires the full content array, not just text)

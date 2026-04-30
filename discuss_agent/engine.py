@@ -138,10 +138,18 @@ class DiscussionEngine:
     def _create_conversations(self) -> None:
         """Create an AgentConversation for each configured agent."""
         global_defs, global_callables = self._load_tools()
+        logger.info(
+            "Loaded %d global tools: %s",
+            len(global_defs), list(global_callables.keys()),
+        )
 
         for ac in self._config.agents:
             agent_defs, agent_callables = self._resolve_agent_tools(
                 ac, global_defs, global_callables,
+            )
+            logger.info(
+                "Agent '%s': %d tools available",
+                ac.name, len(agent_defs),
             )
             self._conversations[ac.name] = AgentConversation(
                 agent_name=ac.name,
