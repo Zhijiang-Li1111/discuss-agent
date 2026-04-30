@@ -230,6 +230,10 @@ class DiscussionEngine:
             f"- 引用具体的数据、来源或事实来支撑你的论点\n"
             f"- 提出明确的立场，而不是面面俱到的概述\n"
             f"- 如果前几轮讨论中有你认同或反对的观点，直接回应它们\n\n"
+            f"**格式要求：每个核心论点必须用 ##CLAIM:关键词## 标记开头。** 例如：\n"
+            f"##CLAIM:能繁去化进度## 当前能繁母猪3904万头...\n"
+            f"##CLAIM:牧原成本优势## 头均完全成本14.5元...\n"
+            f"这样其他讨论者可以精准定位并反驳你的具体论点。\n\n"
             f"如果你需要查阅更多资料来支撑你的观点，请使用可用的工具。"
         )
 
@@ -258,11 +262,20 @@ class DiscussionEngine:
         logger.info("=== Round %d CHALLENGE start (%d agents) ===", round_num, len(self._agents))
 
         async def call_agent(agent: Agent) -> AgentUtterance | None:
-            # Only show other agents' expression summaries (first 800 chars each)
+            # Extract CLAIM tags as index, fall back to first 800 chars
             others = [e for e in expressions if e.agent_name != agent.name]
-            _SUMMARY_LEN = 800
-            others_summary = "\n\n".join(
-                f"[{e.agent_name}] {e.content[:_SUMMARY_LEN]}{'...' if len(e.content) > _SUMMARY_LEN else ''}"
+
+            def _extract_claims(content: str) -> str:
+                """Extract ##CLAIM:xxx## lines as index."""
+                claims = re.findall(r'(##CLAIM:.*?##.*?)(?=\n##CLAIM:|\n\n|$)', content, re.DOTALL)
+                if claims:
+                    # Return first 200 chars of each claim as index
+                    return "\n".join(c[:200] + ("..." if len(c) > 200 else "") for c in claims)
+                # Fallback: first 800 chars
+                return content[:800] + ("..." if len(content) > 800 else "")
+
+            others_index = "\n\n".join(
+                f"[{e.agent_name}]\n{_extract_claims(e.content)}"
                 for e in others
             )
 
@@ -272,9 +285,10 @@ class DiscussionEngine:
                 express_file = os.path.join(self._archiver._session_path, "rounds", f"round_{round_num}_express.json")
                 if os.path.isfile(express_file):
                     archive_hint = (
-                        f"\n\n💡 以上仅为摘要（每人前{_SUMMARY_LEN}字）。"
-                        f"完整观点存储在 {express_file}，"
-                        f"你可以用 read_file 或 grep_file 工具查阅完整内容。\n"
+                        f"\n\n💡 以上是各方核心论点索引（##CLAIM:关键词##）。"
+                        f"完整论证在 {express_file}。"
+                        f"你可以用 grep_file('{express_file}', '##CLAIM:') 查看所有论点，"
+                        f"然后用 read_file 读取需要反驳的具体段落。\n"
                     )
 
             limitation_prefix = ""
@@ -288,8 +302,8 @@ class DiscussionEngine:
             prompt = (
                 f"{limitation_prefix}"
                 f"{guidance_prefix}"
-                f"以下是其他讨论者在第{round_num}轮的观点：\n\n"
-                f"{others_summary}\n\n"
+                f"以下是其他讨论者在第{round_num}轮的核心论点索引：\n\n"
+                f"{others_index}\n\n"
                 f"{archive_hint}"
                 f"请仔细审视上述观点，找出其中的薄弱环节并提出有针对性的质疑。"
                 f"有价值的质疑应该做到：\n"
