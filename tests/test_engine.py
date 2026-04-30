@@ -1,909 +1,200 @@
-"""Tests for DiscussionEngine in discuss_agent.engine."""
+"""Integration tests for DiscussionEngine."""
 
 from __future__ import annotations
 
-import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from discuss_agent.config import ToolConfig
-from discuss_agent.models import AgentUtterance, RoundRecord
+from discuss_agent.claims import ClaimsManager
+from discuss_agent.config import (
+    AgentConfig,
+    DiscussionConfig,
+    HostConfig,
+    ModelConfig,
+    ToolConfig,
+)
+from discuss_agent.models import DiscussionResult
 
-from tests.shared import MockRunOutput, make_config, patch_engine
+
+def _make_config(num_agents: int = 2, max_rounds: int = 3) -> DiscussionConfig:
+    agents = [
+        AgentConfig(
+            name=f"Agent-{chr(65 + i)}",
+            system_prompt=f"You are agent {chr(65 + i)}.",
+        )
+        for i in range(num_agents)
+    ]
+    return DiscussionConfig(
+        min_rounds=1,
+        max_rounds=max_rounds,
+        model_config=ModelConfig(model="claude-sonnet-4-20250514", api_key="test-key"),
+        agents=agents,
+        host=HostConfig(
+            convergence_prompt="Judge convergence.",
+            summary_prompt="Summarize.",
+            skip_summary=True,
+        ),
+        tools=[],
+        context={},
+    )
 
 
-# ---------------------------------------------------------------------------
-# Agent Creation
-# ---------------------------------------------------------------------------
+class TestDiscussionEngineIntegration:
+    """Test 2 agents running 2 rounds with CLAIM state transitions."""
 
-
-class TestAgentCreation:
-    @patch("discuss_agent.engine.import_from_path")
+    @patch("discuss_agent.engine.generate_usage_summary")
+    @patch("discuss_agent.engine.AuditLogger")
+    @patch("discuss_agent.engine.Archiver")
     @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    def test_creates_agents_from_config(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(num_agents=3)
-        engine = DiscussionEngine(config)
-
-        assert MockAgent.call_count == 4
-        agent_calls = MockAgent.call_args_list
-        discussion_names = [c.kwargs["name"] for c in agent_calls[:3]]
-        assert discussion_names == ["Agent-A", "Agent-B", "Agent-C"]
-        assert agent_calls[3].kwargs["name"] == "Host"
-
-
-# ---------------------------------------------------------------------------
-# Per-agent Tools
-# ---------------------------------------------------------------------------
-
-
-class TestPerAgentTools:
-
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    def test_global_tools_inherited(self, MockAgent, MockCtxMgr):
-        from discuss_agent.engine import DiscussionEngine
-
-        class FakeTool:
-            def __init__(self, context=None):
-                pass
-
-        with patch("discuss_agent.engine.import_from_path", return_value=FakeTool):
-            config = make_config(
-                num_agents=2,
-                tools=[ToolConfig(path="pkg.FakeTool")],
-            )
-            engine = DiscussionEngine(config)
-
-        for call_obj in MockAgent.call_args_list[:2]:
-            tools_arg = call_obj.kwargs.get("tools")
-            assert tools_arg is not None
-            assert len(tools_arg) == 1
-
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    def test_extra_tools_added(self, MockAgent, MockCtxMgr):
-        from discuss_agent.engine import DiscussionEngine
-
-        class FakeGlobal:
-            def __init__(self, context=None):
-                pass
-
-        class FakeExtra:
-            def __init__(self, context=None):
-                pass
-
-        def mock_import(path):
-            if path == "pkg.FakeGlobal":
-                return FakeGlobal
-            if path == "pkg.FakeExtra":
-                return FakeExtra
-            raise ImportError(path)
-
-        with patch("discuss_agent.engine.import_from_path", side_effect=mock_import):
-            config = make_config(
-                num_agents=2,
-                tools=[ToolConfig(path="pkg.FakeGlobal")],
-                agent_overrides={
-                    "Agent-A": {"extra_tools": [ToolConfig(path="pkg.FakeExtra")]},
-                },
-            )
-            engine = DiscussionEngine(config)
-
-        agent_a_tools = MockAgent.call_args_list[0].kwargs.get("tools")
-        assert len(agent_a_tools) == 2
-        agent_b_tools = MockAgent.call_args_list[1].kwargs.get("tools")
-        assert len(agent_b_tools) == 1
-
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    def test_disable_tools_removed(self, MockAgent, MockCtxMgr):
-        from discuss_agent.engine import DiscussionEngine
-
-        class FakeToolA:
-            def __init__(self, context=None):
-                pass
-
-        class FakeToolB:
-            def __init__(self, context=None):
-                pass
-
-        def mock_import(path):
-            if path == "pkg.FakeToolA":
-                return FakeToolA
-            if path == "pkg.FakeToolB":
-                return FakeToolB
-            raise ImportError(path)
-
-        with patch("discuss_agent.engine.import_from_path", side_effect=mock_import):
-            config = make_config(
-                num_agents=2,
-                tools=[
-                    ToolConfig(path="pkg.FakeToolA"),
-                    ToolConfig(path="pkg.FakeToolB"),
-                ],
-                agent_overrides={
-                    "Agent-A": {"disable_tools": ["pkg.FakeToolA"]},
-                },
-            )
-            engine = DiscussionEngine(config)
-
-        agent_a_tools = MockAgent.call_args_list[0].kwargs.get("tools")
-        assert len(agent_a_tools) == 1
-        agent_b_tools = MockAgent.call_args_list[1].kwargs.get("tools")
-        assert len(agent_b_tools) == 2
-
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    def test_disable_nonexistent_warns(self, MockAgent, MockCtxMgr, caplog):
-        from discuss_agent.engine import DiscussionEngine
-
-        with patch("discuss_agent.engine.import_from_path"):
-            with caplog.at_level(logging.WARNING, logger="discuss_agent.engine"):
-                config = make_config(
-                    num_agents=1,
-                    agent_overrides={
-                        "Agent-A": {"disable_tools": ["pkg.NonExistent"]},
-                    },
-                )
-                engine = DiscussionEngine(config)
-
-        assert "pkg.NonExistent" in caplog.text
-        assert "does not match" in caplog.text
-
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    def test_duplicate_in_extra_deduped(self, MockAgent, MockCtxMgr):
-        from discuss_agent.engine import DiscussionEngine
-
-        class FakeTool:
-            def __init__(self, context=None):
-                pass
-
-        with patch("discuss_agent.engine.import_from_path", return_value=FakeTool):
-            config = make_config(
-                num_agents=1,
-                tools=[ToolConfig(path="pkg.FakeTool")],
-                agent_overrides={
-                    "Agent-A": {"extra_tools": [ToolConfig(path="pkg.FakeTool")]},
-                },
-            )
-            engine = DiscussionEngine(config)
-
-        agent_tools = MockAgent.call_args_list[0].kwargs.get("tools")
-        assert len(agent_tools) == 1
-
-
-# ---------------------------------------------------------------------------
-# Express (Parallel)
-# ---------------------------------------------------------------------------
-
-
-class TestExpress:
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @pytest.mark.asyncio
-    async def test_express_returns_utterances(self, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        mock_agents = [MagicMock(name="Agent-A"), MagicMock(name="Agent-B")]
-        mock_agents[0].name = "Agent-A"
-        mock_agents[1].name = "Agent-B"
-        mock_host = MagicMock(name="Host")
-        mock_host.name = "Host"
-
-        with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = make_config(num_agents=2)
-            engine = DiscussionEngine(config)
-
-        async def mock_safe_call(agent, prompt):
-            return f"Opinion from {agent.name}"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            result = await engine._express(1, "context", [])
-
-        assert len(result) == 2
-        assert all(isinstance(u, AgentUtterance) for u in result)
-        names = {u.agent_name for u in result}
-        assert names == {"Agent-A", "Agent-B"}
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_express_prompt_includes_history(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(num_agents=1)
-        engine = DiscussionEngine(config)
-        engine._agents[0].name = "Agent-A"
-
-        history = [
-            RoundRecord(
-                round_num=1,
-                expressions=[AgentUtterance("Agent-A", "First opinion")],
-                challenges=[AgentUtterance("Agent-A", "First challenge")],
-            )
-        ]
-
-        captured_prompts = []
-
-        async def mock_safe_call(agent, prompt):
-            captured_prompts.append(prompt)
-            return "Response"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._express(2, "context-text", history)
-
-        assert len(captured_prompts) == 1
-        prompt = captured_prompts[0]
-        assert "First opinion" in prompt
-        assert "First challenge" in prompt
-        assert "context-text" in prompt
-
-
-# ---------------------------------------------------------------------------
-# Challenge (Parallel)
-# ---------------------------------------------------------------------------
-
-
-class TestChallenge:
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @pytest.mark.asyncio
-    async def test_challenge_excludes_own_expression(self, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        mock_agents = [MagicMock(), MagicMock()]
-        mock_agents[0].name = "Agent-A"
-        mock_agents[1].name = "Agent-B"
-        mock_host = MagicMock()
-        mock_host.name = "Host"
-
-        with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = make_config(num_agents=2)
-            engine = DiscussionEngine(config)
-
-        expressions = [
-            AgentUtterance("Agent-A", "Opinion from A"),
-            AgentUtterance("Agent-B", "Opinion from B"),
-        ]
-
-        captured = {}
-
-        async def mock_safe_call(agent, prompt):
-            captured[agent.name] = prompt
-            return f"Challenge from {agent.name}"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            result = await engine._challenge(1, expressions)
-
-        assert "[Agent-A]" not in captured["Agent-A"]
-        assert "Opinion from A" not in captured["Agent-A"]
-        assert "Opinion from B" in captured["Agent-A"]
-        assert "[Agent-B]" not in captured["Agent-B"]
-        assert "Opinion from B" not in captured["Agent-B"]
-        assert "Opinion from A" in captured["Agent-B"]
-
-
-# ---------------------------------------------------------------------------
-# Host Judgment
-# ---------------------------------------------------------------------------
-
-
-class TestHostJudgment:
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_host_judge_parses_json(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config()
-        engine = DiscussionEngine(config)
-
-        json_response = '{"converged": true, "reason": "All agree", "remaining_disputes": []}'
-        engine._host.arun = AsyncMock(return_value=MockRunOutput(json_response))
-
-        history = [
-            RoundRecord(
-                round_num=1,
-                expressions=[AgentUtterance("Agent-A", "Opinion")],
-                challenges=[AgentUtterance("Agent-A", "Challenge")],
-            )
-        ]
-
-        result = await engine._host_judge(history)
-        assert result["converged"] is True
-        assert result["reason"] == "All agree"
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_host_judge_malformed_defaults_not_converged(
-        self, MockAgent, MockCtxMgr, mock_import
+    @patch("discuss_agent.engine.AgentConversation")
+    @patch("discuss_agent.engine.anthropic")
+    async def test_two_agents_two_rounds_convergence(
+        self,
+        mock_anthropic_mod,
+        MockConversation,
+        MockCtxMgr,
+        MockArchiver,
+        MockAuditLogger,
+        mock_usage_summary,
     ):
         from discuss_agent.engine import DiscussionEngine
 
-        config = make_config()
-        engine = DiscussionEngine(config)
-        engine._host.arun = AsyncMock(return_value=MockRunOutput("This is not JSON at all!!!"))
+        config = _make_config(num_agents=2, max_rounds=3)
 
-        history = [
-            RoundRecord(
-                round_num=1,
-                expressions=[AgentUtterance("Agent-A", "Opinion")],
-                challenges=[AgentUtterance("Agent-A", "Challenge")],
-            )
+        # --- Mock Archiver ---
+        archiver_inst = MagicMock()
+        archiver_inst.start_session.return_value = "/tmp/test_session"
+        archiver_inst.save_round = MagicMock()
+        archiver_inst.save_context = MagicMock()
+        archiver_inst.save_summary = MagicMock()
+        MockArchiver.return_value = archiver_inst
+
+        # --- Mock AuditLogger ---
+        audit_inst = MagicMock()
+        MockAuditLogger.return_value = audit_inst
+
+        # --- Mock ContextManager ---
+        ctx_inst = MagicMock()
+        ctx_inst.build_initial_context = AsyncMock(return_value="猪周期分析议题")
+        MockCtxMgr.return_value = ctx_inst
+
+        # --- Mock AgentConversation ---
+        # Round 1: both agents propose claims
+        # Round 2: both agents accept each other's claims
+        call_counts = {"Agent-A": 0, "Agent-B": 0}
+
+        def make_conv(**kwargs):
+            name = kwargs["agent_name"]
+            conv = MagicMock()
+            conv.agent_name = name
+            conv.messages = []
+
+            async def _send(prompt):
+                call_counts[name] += 1
+                count = call_counts[name]
+                if count == 1:
+                    if name == "Agent-A":
+                        return "[NEW_CLAIM:能繁去化] 当前3904万头"
+                    else:
+                        return "[NEW_CLAIM:成本优势] 头均14.5元"
+                else:
+                    if name == "Agent-A":
+                        return "[ACCEPT TO:成本优势] 招商证券确认"
+                    else:
+                        return "[ACCEPT TO:能繁去化] 农业部数据确认"
+
+            conv.send = AsyncMock(side_effect=_send)
+            return conv
+
+        MockConversation.side_effect = make_conv
+
+        # --- Mock host judge (Anthropic API) ---
+        # After round 2: close both claims
+        mock_host_response = MagicMock()
+        mock_host_response.content = [
+            MagicMock(type="text", text='[{"claim":"能繁去化","verdict":"CLOSED:共识","reason":"双方一致"},{"claim":"成本优势","verdict":"CLOSED:共识","reason":"双方一致"}]')
         ]
 
-        result = await engine._host_judge(history)
-        assert result["converged"] is False
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_host_response)
+        mock_anthropic_mod.AsyncAnthropic.return_value = mock_client
 
-
-# ---------------------------------------------------------------------------
-# Host Summary
-# ---------------------------------------------------------------------------
-
-
-class TestHostSummary:
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_host_summarize_returns_content(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config()
+        # --- Run engine ---
         engine = DiscussionEngine(config)
-
-        history = [
-            RoundRecord(
-                round_num=1,
-                expressions=[AgentUtterance("Agent-A", "Opinion")],
-                challenges=[AgentUtterance("Agent-A", "Challenge")],
-            )
-        ]
-
-        summary_text = "Final summary: everyone agrees on X."
-
-        with patch("discuss_agent.engine.Agent") as PatchedAgent:
-            mock_summary_agent = MagicMock()
-            mock_summary_agent.arun = AsyncMock(return_value=MockRunOutput(summary_text))
-            PatchedAgent.return_value = mock_summary_agent
-
-            result = await engine._host_summarize(history)
-
-        assert result == summary_text
-
-
-# ---------------------------------------------------------------------------
-# Error Handling
-# ---------------------------------------------------------------------------
-
-
-class TestErrorHandling:
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @pytest.mark.asyncio
-    async def test_single_agent_failure_retries_and_skips(self, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        mock_agents = [MagicMock(), MagicMock()]
-        mock_agents[0].name = "Agent-A"
-        mock_agents[1].name = "Agent-B"
-        mock_host = MagicMock()
-        mock_host.name = "Host"
-
-        with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = make_config(num_agents=2)
-            engine = DiscussionEngine(config)
-
-        async def mock_safe_call(agent, prompt):
-            if agent.name == "Agent-A":
-                return None
-            return "Agent-B opinion"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            result = await engine._express(1, "context", [])
-
-        assert len(result) == 1
-        assert result[0].agent_name == "Agent-B"
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @pytest.mark.asyncio
-    async def test_all_agents_fail_raises(self, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine, AllAgentsFailedError
-
-        mock_agents = [MagicMock(), MagicMock()]
-        mock_agents[0].name = "Agent-A"
-        mock_agents[1].name = "Agent-B"
-        mock_host = MagicMock()
-        mock_host.name = "Host"
-
-        with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = make_config(num_agents=2)
-            engine = DiscussionEngine(config)
-
-        async def mock_safe_call(agent, prompt):
-            return None
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            with pytest.raises(AllAgentsFailedError):
-                await engine._express(1, "context", [])
-
-
-# ---------------------------------------------------------------------------
-# Main Loop
-# ---------------------------------------------------------------------------
-
-
-class TestMainLoop:
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_full_loop_converges(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(min_rounds=2, max_rounds=5)
-        engine = DiscussionEngine(config)
-
-        engine._archiver = MagicMock()
-        engine._archiver.start_session.return_value = "/tmp/session"
-        engine._context_mgr.build_initial_context = AsyncMock(return_value="Initial context")
-        engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
-
-        judgments = [
-            {"converged": False, "reason": "Still debating", "remaining_disputes": ["topic X"]},
-            {"converged": True, "reason": "Agreement reached", "remaining_disputes": []},
-        ]
-        patch_engine(engine, judgments)
-
         result = await engine.run()
 
+        # --- Assertions ---
         assert result.converged is True
-        assert result.rounds_completed == 2
-        assert result.archive_path == "/tmp/session"
-        assert result.summary == "Final summary content"
+        assert result.rounds_completed >= 2
         assert result.remaining_disputes == []
 
-    @patch("discuss_agent.engine.import_from_path")
+        # Verify agents were called (round 1 + round 2)
+        assert call_counts["Agent-A"] == 2
+        assert call_counts["Agent-B"] == 2
+
+    @patch("discuss_agent.engine.generate_usage_summary")
+    @patch("discuss_agent.engine.AuditLogger")
+    @patch("discuss_agent.engine.Archiver")
     @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_min_rounds_enforced(self, MockAgent, MockCtxMgr, mock_import):
+    @patch("discuss_agent.engine.AgentConversation")
+    @patch("discuss_agent.engine.anthropic")
+    async def test_max_rounds_without_convergence(
+        self,
+        mock_anthropic_mod,
+        MockConversation,
+        MockCtxMgr,
+        MockArchiver,
+        MockAuditLogger,
+        mock_usage_summary,
+    ):
         from discuss_agent.engine import DiscussionEngine
 
-        config = make_config(min_rounds=2, max_rounds=5)
-        engine = DiscussionEngine(config)
+        config = _make_config(num_agents=2, max_rounds=2)
 
-        engine._archiver = MagicMock()
-        engine._archiver.start_session.return_value = "/tmp/session"
-        engine._context_mgr.build_initial_context = AsyncMock(return_value="ctx")
-        engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
+        archiver_inst = MagicMock()
+        archiver_inst.start_session.return_value = "/tmp/test_session2"
+        archiver_inst.save_round = MagicMock()
+        archiver_inst.save_context = MagicMock()
+        MockArchiver.return_value = archiver_inst
 
-        judgments = [
-            {"converged": True, "reason": "Early convergence", "remaining_disputes": []},
-            {"converged": True, "reason": "Still converged", "remaining_disputes": []},
+        MockAuditLogger.return_value = MagicMock()
+
+        ctx_inst = MagicMock()
+        ctx_inst.build_initial_context = AsyncMock(return_value="议题")
+        MockCtxMgr.return_value = ctx_inst
+
+        call_counts = {"Agent-A": 0, "Agent-B": 0}
+
+        def make_conv(**kwargs):
+            name = kwargs["agent_name"]
+            conv = MagicMock()
+            conv.agent_name = name
+            conv.messages = []
+
+            async def _send(prompt):
+                call_counts[name] += 1
+                if call_counts[name] == 1:
+                    return f"[NEW_CLAIM:claim_{name}] content from {name}"
+                return f"[REBUTTAL TO:claim_Agent-{'B' if name == 'Agent-A' else 'A'}] disagree"
+
+            conv.send = AsyncMock(side_effect=_send)
+            return conv
+
+        MockConversation.side_effect = make_conv
+
+        # Host always says CONTINUE
+        mock_response = MagicMock()
+        mock_response.content = [
+            MagicMock(type="text", text='[{"claim":"claim_Agent-A","verdict":"CONTINUE","reason":""},{"claim":"claim_Agent-B","verdict":"CONTINUE","reason":""}]')
         ]
-        patch_engine(engine, judgments)
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        mock_anthropic_mod.AsyncAnthropic.return_value = mock_client
 
+        engine = DiscussionEngine(config)
         result = await engine.run()
 
-        assert result.converged is True
+        assert result.converged is False
         assert result.rounds_completed == 2
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_max_rounds_enforced(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(min_rounds=1, max_rounds=3)
-        engine = DiscussionEngine(config)
-
-        engine._archiver = MagicMock()
-        engine._archiver.start_session.return_value = "/tmp/session"
-        engine._context_mgr.build_initial_context = AsyncMock(return_value="ctx")
-        engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
-
-        judgments = [
-            {"converged": False, "reason": "No", "remaining_disputes": ["X"]},
-            {"converged": False, "reason": "No", "remaining_disputes": ["X"]},
-            {"converged": False, "reason": "No", "remaining_disputes": ["X", "Y"]},
-        ]
-        patch_engine(engine, judgments)
-
-        result = await engine.run()
-
-        assert result.converged is False
-        assert result.rounds_completed == 3
-        assert result.summary is None
-        assert "X" in result.remaining_disputes
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_error_termination(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine, AllAgentsFailedError
-
-        config = make_config(min_rounds=1, max_rounds=5)
-        engine = DiscussionEngine(config)
-
-        engine._archiver = MagicMock()
-        engine._archiver.start_session.return_value = "/tmp/session"
-        engine._context_mgr.build_initial_context = AsyncMock(return_value="ctx")
-        engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
-
-        call_count = {"n": 0}
-
-        async def mock_express(round_num, context, history, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                return [AgentUtterance("Agent-A", "R1 expression")]
-            raise AllAgentsFailedError("All agents failed")
-
-        async def mock_challenge(round_num, expressions, **kwargs):
-            return [AgentUtterance("Agent-A", "R1 challenge")]
-
-        async def mock_host_judge(history):
-            return {"converged": False, "reason": "No", "remaining_disputes": []}
-
-        engine._express = AsyncMock(side_effect=mock_express)
-        engine._challenge = AsyncMock(side_effect=mock_challenge)
-        engine._host_judge = AsyncMock(side_effect=mock_host_judge)
-
-        result = await engine.run()
-
-        assert result.terminated_by_error is True
-        assert result.rounds_completed == 1
-        assert result.converged is False
-
-        save_round_calls = engine._archiver.save_round.call_args_list
-        phases_r1 = [c.args[1] for c in save_round_calls if c.args[0] == 1]
-        assert "express" in phases_r1
-        assert "challenge" in phases_r1
-        assert "host" in phases_r1
-
-        engine._archiver.save_error_log.assert_called_once()
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_three_save_round_calls_per_round(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(min_rounds=1, max_rounds=2)
-        engine = DiscussionEngine(config)
-
-        engine._archiver = MagicMock()
-        engine._archiver.start_session.return_value = "/tmp/session"
-        engine._context_mgr.build_initial_context = AsyncMock(return_value="ctx")
-        engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
-
-        judgments = [
-            {"converged": False, "reason": "No", "remaining_disputes": []},
-            {"converged": True, "reason": "Yes", "remaining_disputes": []},
-        ]
-        patch_engine(engine, judgments)
-
-        result = await engine.run()
-
-        save_round_calls = engine._archiver.save_round.call_args_list
-        assert len(save_round_calls) == 6
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_no_tools_empty_list_runs(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(min_rounds=1, max_rounds=1)
-        engine = DiscussionEngine(config)
-
-        engine._archiver = MagicMock()
-        engine._archiver.start_session.return_value = "/tmp/session"
-        engine._context_mgr.build_initial_context = AsyncMock(return_value="")
-        engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
-
-        judgments = [
-            {"converged": True, "reason": "Quick agreement", "remaining_disputes": []},
-        ]
-        patch_engine(engine, judgments)
-
-        result = await engine.run()
-
-        assert result.converged is True
-        assert result.rounds_completed == 1
-
-
-# ---------------------------------------------------------------------------
-# Limitation Injection
-# ---------------------------------------------------------------------------
-
-
-class TestLimitation:
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_express_includes_limitation(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(num_agents=1, limitation="仅讨论技术可行性")
-        engine = DiscussionEngine(config)
-        engine._agents[0].name = "Agent-A"
-
-        captured_prompts = []
-
-        async def mock_safe_call(agent, prompt):
-            captured_prompts.append(prompt)
-            return "Response"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._express(1, "context-text", [])
-
-        assert "⚠️ 本次讨论范围仅限于：仅讨论技术可行性" in captured_prompts[0]
-        assert captured_prompts[0].startswith("⚠️ 本次讨论范围仅限于：")
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @pytest.mark.asyncio
-    async def test_challenge_includes_limitation(self, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        mock_agents = [MagicMock(), MagicMock()]
-        mock_agents[0].name = "Agent-A"
-        mock_agents[1].name = "Agent-B"
-        mock_host = MagicMock()
-        mock_host.name = "Host"
-
-        with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = make_config(num_agents=2, limitation="仅讨论技术可行性")
-            engine = DiscussionEngine(config)
-
-        expressions = [
-            AgentUtterance("Agent-A", "Opinion from A"),
-            AgentUtterance("Agent-B", "Opinion from B"),
-        ]
-
-        captured = {}
-
-        async def mock_safe_call(agent, prompt):
-            captured[agent.name] = prompt
-            return f"Challenge from {agent.name}"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._challenge(1, expressions)
-
-        for name in ("Agent-A", "Agent-B"):
-            assert "⚠️ 本次讨论范围仅限于：仅讨论技术可行性" in captured[name]
-            assert captured[name].startswith("⚠️ 本次讨论范围仅限于：")
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_express_no_limitation_when_none(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(num_agents=1, limitation=None)
-        engine = DiscussionEngine(config)
-        engine._agents[0].name = "Agent-A"
-
-        captured_prompts = []
-
-        async def mock_safe_call(agent, prompt):
-            captured_prompts.append(prompt)
-            return "Response"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._express(1, "context-text", [])
-
-        assert "⚠️" not in captured_prompts[0]
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_express_no_limitation_when_empty_string(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(num_agents=1, limitation="")
-        engine = DiscussionEngine(config)
-        engine._agents[0].name = "Agent-A"
-
-        captured_prompts = []
-
-        async def mock_safe_call(agent, prompt):
-            captured_prompts.append(prompt)
-            return "Response"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._express(1, "context-text", [])
-
-        assert "⚠️" not in captured_prompts[0]
-
-
-# ---------------------------------------------------------------------------
-# Guidance Injection
-# ---------------------------------------------------------------------------
-
-
-class TestGuidance:
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_express_includes_guidance(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(num_agents=1)
-        engine = DiscussionEngine(config)
-        engine._agents[0].name = "Agent-A"
-
-        captured_prompts = []
-
-        async def mock_safe_call(agent, prompt):
-            captured_prompts.append(prompt)
-            return "Response"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._express(1, "context-text", [], guidance="Focus on cost analysis")
-
-        assert "📋 主编指导意见（请在讨论中优先回应）：Focus on cost analysis" in captured_prompts[0]
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @pytest.mark.asyncio
-    async def test_challenge_includes_guidance(self, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        mock_agents = [MagicMock(), MagicMock()]
-        mock_agents[0].name = "Agent-A"
-        mock_agents[1].name = "Agent-B"
-        mock_host = MagicMock()
-        mock_host.name = "Host"
-
-        with patch("discuss_agent.engine.Agent", side_effect=mock_agents + [mock_host]):
-            config = make_config(num_agents=2)
-            engine = DiscussionEngine(config)
-
-        expressions = [
-            AgentUtterance("Agent-A", "Opinion from A"),
-            AgentUtterance("Agent-B", "Opinion from B"),
-        ]
-
-        captured = {}
-
-        async def mock_safe_call(agent, prompt):
-            captured[agent.name] = prompt
-            return f"Challenge from {agent.name}"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._challenge(1, expressions, guidance="Focus on cost analysis")
-
-        for name in ("Agent-A", "Agent-B"):
-            assert "📋 主编指导意见（请在质疑中优先关注）：Focus on cost analysis" in captured[name]
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_express_no_guidance_when_none(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(num_agents=1)
-        engine = DiscussionEngine(config)
-        engine._agents[0].name = "Agent-A"
-
-        captured_prompts = []
-
-        async def mock_safe_call(agent, prompt):
-            captured_prompts.append(prompt)
-            return "Response"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._express(1, "context-text", [], guidance=None)
-
-        assert "📋" not in captured_prompts[0]
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_express_no_guidance_when_empty_string(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(num_agents=1)
-        engine = DiscussionEngine(config)
-        engine._agents[0].name = "Agent-A"
-
-        captured_prompts = []
-
-        async def mock_safe_call(agent, prompt):
-            captured_prompts.append(prompt)
-            return "Response"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._express(1, "context-text", [], guidance="")
-
-        assert "📋" not in captured_prompts[0]
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_guidance_with_limitation_both_present(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(num_agents=1, limitation="仅讨论技术可行性")
-        engine = DiscussionEngine(config)
-        engine._agents[0].name = "Agent-A"
-
-        captured_prompts = []
-
-        async def mock_safe_call(agent, prompt):
-            captured_prompts.append(prompt)
-            return "Response"
-
-        with patch.object(engine, "_safe_agent_call", side_effect=mock_safe_call):
-            await engine._express(1, "context-text", [], guidance="Focus on cost analysis")
-
-        prompt = captured_prompts[0]
-        assert "⚠️ 本次讨论范围仅限于：仅讨论技术可行性" in prompt
-        assert "📋 主编指导意见（请在讨论中优先回应）：Focus on cost analysis" in prompt
-        # Limitation should come before guidance
-        limitation_pos = prompt.index("⚠️")
-        guidance_pos = prompt.index("📋")
-        assert limitation_pos < guidance_pos
-
-    @patch("discuss_agent.engine.import_from_path")
-    @patch("discuss_agent.engine.ContextManager")
-    @patch("discuss_agent.engine.Agent")
-    @pytest.mark.asyncio
-    async def test_run_passes_guidance_to_express_and_challenge(self, MockAgent, MockCtxMgr, mock_import):
-        from discuss_agent.engine import DiscussionEngine
-
-        config = make_config(min_rounds=1, max_rounds=1)
-        engine = DiscussionEngine(config)
-
-        engine._archiver = MagicMock()
-        engine._archiver.start_session.return_value = "/tmp/session"
-        engine._context_mgr.build_initial_context = AsyncMock(return_value="ctx")
-        engine._context_mgr.compress = AsyncMock(side_effect=lambda h, r: h)
-
-        judgments = [
-            {"converged": True, "reason": "Quick agreement", "remaining_disputes": []},
-        ]
-        patch_engine(engine, judgments)
-
-        result = await engine.run(guidance="Focus on cost analysis")
-
-        assert result.converged is True
-        # Verify _express and _challenge were called with guidance kwarg
-        engine._express.assert_called_once()
-        engine._challenge.assert_called_once()
-        # Check the guidance keyword argument
-        express_kwargs = engine._express.call_args.kwargs
-        assert express_kwargs.get("guidance") == "Focus on cost analysis"
-        challenge_kwargs = engine._challenge.call_args.kwargs
-        assert challenge_kwargs.get("guidance") == "Focus on cost analysis"
+        assert len(result.remaining_disputes) > 0

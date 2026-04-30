@@ -10,6 +10,7 @@ import sys
 from datetime import datetime
 
 from discuss_agent.config import ConfigLoader
+from discuss_agent.engine import DiscussionEngine
 
 
 def _setup_logging() -> None:
@@ -43,32 +44,7 @@ def main() -> None:
         description="Run a multi-agent adversarial discussion."
     )
     parser.add_argument("config", help="Path to YAML configuration file")
-    parser.add_argument(
-        "--resume",
-        help="Path to existing discussion archive to resume from",
-    )
-    parser.add_argument(
-        "--rounds",
-        type=int,
-        help="Number of additional rounds to run (used with --resume)",
-    )
-    parser.add_argument(
-        "--guidance",
-        help="Editorial guidance injected into agent prompts to steer the discussion",
-    )
     args = parser.parse_args()
-
-    if args.resume and args.rounds is None:
-        print("Error: --rounds is required when using --resume", file=sys.stderr)
-        sys.exit(1)
-
-    if args.rounds is not None and not args.resume:
-        print("Error: --rounds can only be used with --resume", file=sys.stderr)
-        sys.exit(1)
-
-    if args.rounds is not None and args.rounds < 1:
-        print("Error: --rounds must be a positive integer", file=sys.stderr)
-        sys.exit(1)
 
     if not os.path.isfile(args.config):
         print(f"Error: config file not found: {args.config}", file=sys.stderr)
@@ -77,24 +53,10 @@ def main() -> None:
     config = ConfigLoader.load(args.config)
 
     _setup_logging()
-    logging.info("Config loaded: %s (mode: %s)", args.config, config.mode)
+    logging.info("Config loaded: %s", args.config)
 
-    if config.mode == "shared_file":
-        from discuss_agent.engine_v2 import SharedFileEngine
-
-        engine = SharedFileEngine(config)
-        result = asyncio.run(engine.run())
-    else:
-        from discuss_agent.engine import DiscussionEngine
-
-        engine = DiscussionEngine(config)
-        result = asyncio.run(
-            engine.run(
-                resume_path=args.resume,
-                extra_rounds=args.rounds,
-                guidance=args.guidance,
-            )
-        )
+    engine = DiscussionEngine(config)
+    result = asyncio.run(engine.run())
 
     print(f"Discussion archived at: {result.archive_path}")
     if result.converged:
