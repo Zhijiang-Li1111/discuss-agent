@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time as _time
 from dataclasses import asdict
@@ -257,14 +258,24 @@ class DiscussionEngine:
         logger.info("=== Round %d CHALLENGE start (%d agents) ===", round_num, len(self._agents))
 
         async def call_agent(agent: Agent) -> AgentUtterance | None:
-            # Only show other agents' expressions
+            # Only show other agents' expression summaries (first 800 chars each)
             others = [e for e in expressions if e.agent_name != agent.name]
-            # Truncate each expression to avoid overly long prompts
-            _MAX_CHARS_PER_AGENT = 3000
-            others_text = "\n\n".join(
-                f"[{e.agent_name}] {e.content[:_MAX_CHARS_PER_AGENT]}{'... (截断，完整版请用工具搜索验证)' if len(e.content) > _MAX_CHARS_PER_AGENT else ''}"
+            _SUMMARY_LEN = 800
+            others_summary = "\n\n".join(
+                f"[{e.agent_name}] {e.content[:_SUMMARY_LEN]}..."
                 for e in others
             )
+
+            # Tell agent where to find full text
+            archive_hint = ""
+            if hasattr(self._archiver, '_session_path') and self._archiver._session_path:
+                express_file = os.path.join(self._archiver._session_path, "rounds", f"round_{round_num}_express.json")
+                if os.path.isfile(express_file):
+                    archive_hint = (
+                        f"\n\n💡 以上仅为摘要（每人前{_SUMMARY_LEN}字）。"
+                        f"完整观点存储在 {express_file}，"
+                        f"你可以用 read_file 或 grep_file 工具查阅完整内容。\n"
+                    )
 
             limitation_prefix = ""
             if self._config.limitation:
