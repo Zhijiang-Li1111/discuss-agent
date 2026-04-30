@@ -145,6 +145,7 @@ class DiscussionEngine:
 
     async def _safe_agent_call(self, agent: Agent, prompt: str) -> str | None:
         """Call *agent* with retry. Returns content or ``None`` on failure."""
+        logger.info("  -> Calling agent '%s' (prompt %d chars)...", agent.name, len(prompt))
         if self._audit:
             start_extras = AuditLogger.extract_call_start_extras(agent)
             self._audit.log_call_start(agent.name, prompt, **start_extras)
@@ -154,6 +155,7 @@ class DiscussionEngine:
                 result = await agent.arun(input=prompt, stream=False)
                 if result.content:
                     elapsed = (_time.monotonic() - t0) * 1000
+                    logger.info("  <- Agent '%s' returned %d chars in %.1fs", agent.name, len(result.content), elapsed/1000)
                     if self._audit:
                         self._audit.log_from_run_output(agent.name, result)
                         end_extras = AuditLogger.extract_call_end_extras(result)
@@ -205,6 +207,7 @@ class DiscussionEngine:
         guidance: str | None = None,
     ) -> list[AgentUtterance]:
         """All agents express opinions in parallel."""
+        logger.info("=== Round %d EXPRESS start (%d agents) ===", round_num, len(self._agents))
         history_text = self._format_history(history)
 
         limitation_prefix = ""
@@ -251,6 +254,7 @@ class DiscussionEngine:
         guidance: str | None = None,
     ) -> list[AgentUtterance]:
         """Each agent challenges OTHER agents' expressions."""
+        logger.info("=== Round %d CHALLENGE start (%d agents) ===", round_num, len(self._agents))
 
         async def call_agent(agent: Agent) -> AgentUtterance | None:
             # Only show other agents' expressions
@@ -297,6 +301,7 @@ class DiscussionEngine:
     # ------------------------------------------------------------------
 
     async def _host_judge(self, history: list[RoundRecord]) -> dict:
+        logger.info("=== HOST JUDGE (convergence check) ===")
         """Host judges convergence. Returns parsed JSON or default not-converged."""
         history_text = self._format_history(history)
         prompt = (
@@ -341,6 +346,7 @@ class DiscussionEngine:
     # ------------------------------------------------------------------
 
     async def _host_summarize(self, history: list[RoundRecord]) -> str:
+        logger.info("=== HOST SUMMARIZE (generating final report) ===")
         """Host generates final summary after convergence."""
         host_model_config = self._config.host.resolve_model(self._config.model_config)
         summary_agent = Agent(
@@ -353,13 +359,16 @@ class DiscussionEngine:
         history_text = self._format_history(history)
         prompt = (
             f"以下是完整的讨论记录：\n\n{history_text}\n\n"
-            f"讨论已经结束。请基于上述记录生成一份结构化的总结报告。\n\n"
-            f"你的总结应当包含：\n"
-            f"- 核心结论：讨论各方最终达成的共识是什么\n"
-            f"- 关键论据：支撑结论的主要证据和推理链条\n"
-            f"- 多元视角：不同讨论者带来的差异化观点和贡献\n"
-            f"- 未决事项：如果存在未完全解决的分歧，如实记录\n\n"
-            f"总结应当忠于讨论内容，不添加讨论中未出现的信息。"
+            f"讨论已经结束。请基于最后一轮各方达成的共识输出总结。\n\n"
+            f"关键原则：\n"
+            f"- 如果最后一轮中已有完整的结构化输出（如 chapter_memo、分析报告等），"
+            f"直接采用该版本的内容，不要混合之前轮次的不同版本\n"
+            f"- 如果最后一轮有多个角色输出了不同版本，以最后发言的共识版本为准\n"
+            f"- 如果最后一轮没有完整结构化输出，按照 system 指令的格式要求，"
+            f"基于全部讨论记录综合提炼\n"
+            f"- 如果最后一轮内容不完整或仅有部分角色发言，"
+            f"以讨论中最接近共识的最新完整版本为准\n"
+            f"- 忠于讨论内容，不添加讨论中未出现的信息"
         )
         result = await summary_agent.arun(input=prompt, stream=False)
         return result.content
@@ -447,8 +456,11 @@ class DiscussionEngine:
                     judgment.get("converged", False)
                     and round_num >= self._config.min_rounds
                 ):
-                    summary = await self._host_summarize(history)
-                    self._archiver.save_summary(summary)
+                    if self._config.host.skip_summary:
+                        summary = None
+                    else:
+                        summary = await self._host_summarize(history)
+                        self._archiver.save_summary(summary)
                     return DiscussionResult(
                         converged=True,
                         rounds_completed=round_num,
