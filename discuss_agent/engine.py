@@ -230,10 +230,13 @@ class DiscussionEngine:
             f"- 引用具体的数据、来源或事实来支撑你的论点\n"
             f"- 提出明确的立场，而不是面面俱到的概述\n"
             f"- 如果前几轮讨论中有你认同或反对的观点，直接回应它们\n\n"
-            f"**格式要求：每个核心论点必须用 ##CLAIM:关键词## 标记开头。** 例如：\n"
-            f"##CLAIM:能繁去化进度## 当前能繁母猪3904万头...\n"
-            f"##CLAIM:牧原成本优势## 头均完全成本14.5元...\n"
-            f"这样其他讨论者可以精准定位并反驳你的具体论点。\n\n"
+            f"**格式要求：每个核心论点必须用 ##CLAIM:关键词 [OPEN]## 标记开头。** 例如：\n"
+            f"##CLAIM:能繁去化进度 [OPEN]## 当前能繁母猪3904万头...\n"
+            f"##CLAIM:牧原成本优势 [OPEN]## 头均完全成本14.5元...\n"
+            f"所有新提出的论点初始状态为 OPEN。在后续轮次中，状态会更新为：\n"
+            f"- [CHALLENGED] — 已被质疑，等待回应\n"
+            f"- [CLOSED:共识] — 各方达成一致\n"
+            f"- [CLOSED:分歧] — 讨论充分但无法一致，记录分歧\n\n"
             f"如果你需要查阅更多资料来支撑你的观点，请使用可用的工具。"
         )
 
@@ -311,7 +314,10 @@ class DiscussionEngine:
                 f"  1. 用 grep_file 搜关键词，拿到行号：grep_file('<文件路径>', '##CLAIM:关键词')\n"
                 f"  2. 用 read_file 从该行号开始读完整段落：read_file('<文件路径>', offset=行号, limit=30)\n\n"
                 f"**第三步：用 research_search 或 web_search 搜索反驳证据。** 不要凭空反驳，必须有数据支撑。\n\n"
-                f"**第四步：写出你的质疑。** 针对每个论点，指出具体的逻辑漏洞、数据缺失或隐含假设，并给出你的替代解释或反面证据。\n\n"
+                f"**第四步：写出你的质疑。** 针对每个论点：\n"
+                f"  - 如果你反驳了它，将其标记为 ##CLAIM:关键词 [CHALLENGED]##\n"
+                f"  - 如果你认可它，将其标记为 ##CLAIM:关键词 [CLOSED:共识]##\n"
+                f"  - 指出具体的逻辑漏洞、数据缺失或隐含假设，并给出你的替代解释或反面证据。\n\n"
                 f"有价值的质疑应该做到：\n"
                 f"- 指出论证中的逻辑漏洞、数据缺失或隐含假设\n"
                 f"- 提供反面证据或替代解释\n"
@@ -341,15 +347,22 @@ class DiscussionEngine:
         history_text = self._format_history(history)
         prompt = (
             f"以下是到目前为止的完整讨论记录：\n\n{history_text}\n\n"
-            f"请判断这场讨论是否已经收敛。收敛意味着各方在核心问题上已经达成基本共识，"
-            f"最近一轮不再出现实质性的新挑战或新论据。\n\n"
+            f"请判断这场讨论是否已经收敛。\n\n"
+            f"**关键：检查 ##CLAIM 标签的状态。**\n"
+            f"- [OPEN] = 尚未被质疑\n"
+            f"- [CHALLENGED] = 已被质疑，等待回应\n"
+            f"- [CLOSED:共识] = 已达成一致\n"
+            f"- [CLOSED:分歧] = 讨论充分，各方保留分歧\n\n"
+            f"收敛条件：所有重要 CLAIM 的状态都是 CLOSED（共识或分歧均可），"
+            f"没有 OPEN 或 CHALLENGED 的核心论点还悬而未决。\n\n"
             f"判断时请注意：\n"
             f"- 重复已有论点或仅做措辞调整不算新质疑\n"
             f"- 各方观点不必完全一致，只要核心分歧已被充分讨论即可\n"
             f"- 一方明确接受对方论据并调整立场是收敛的强信号\n\n"
             f"请返回以下 JSON 格式：\n"
             f'{{"converged": true/false, "reason": "你的判断理由", '
-            f'"remaining_disputes": ["尚未解决的分歧点，如果有"]}}'
+            f'"open_claims": ["仍为OPEN/CHALLENGED状态的CLAIM"], '
+            f'"remaining_disputes": ["已CLOSED但标记为分歧的论点"]}}'
         )
 
         for attempt in range(2):
