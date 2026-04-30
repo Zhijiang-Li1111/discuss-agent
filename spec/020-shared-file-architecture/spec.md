@@ -101,6 +101,7 @@ agent_a_messages = [
 ```
 
 **设计原则：**
+- 所有 CLAIM 的每一条记录都必须有 FROM 标签（含 agent 名称和轮次），无论 OPEN 还是 CLOSED
 - OPEN claims 全文进 prompt（含 FROM 标签，知道谁说了什么）
 - CLOSED claims 不进 prompt（只通知关闭了）
 - grep/read 保留给特殊需求（如想看 CLOSED 论点的完整讨论过程）
