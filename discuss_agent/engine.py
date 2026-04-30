@@ -51,9 +51,98 @@ class DiscussionEngine:
         # Host model config
         self._host_model_config = config.host.resolve_model(config.model_config)
 
+    def _load_tools(self) -> tuple[list[dict], dict[str, callable]]:
+        """Load tools from config and convert to Anthropic format.
+
+        Returns (tool_definitions, tool_callables) where:
+        - tool_definitions: list of dicts in Anthropic tool format
+        - tool_callables: mapping from tool name to callable
+        """
+        tool_defs: list[dict] = []
+        tool_callables: dict[str, callable] = {}
+
+        for tc in self._config.tools:
+            try:
+                cls = import_from_path(tc.path)
+                toolkit = cls()  # instantiate the Toolkit
+                # Collect sync functions
+                for name, func in toolkit.functions.items():
+                    tool_defs.append({
+                        "name": name,
+                        "description": func.description or "",
+                        "input_schema": func.parameters or {"type": "object", "properties": {}},
+                    })
+                    tool_callables[name] = func.entrypoint
+                # Collect async functions
+                for name, func in toolkit.async_functions.items():
+                    if name not in tool_callables:
+                        tool_defs.append({
+                            "name": name,
+                            "description": func.description or "",
+                            "input_schema": func.parameters or {"type": "object", "properties": {}},
+                        })
+                    # Prefer async over sync
+                    tool_callables[name] = func.entrypoint
+            except Exception:
+                logger.warning("Failed to load tool %s", tc.path, exc_info=True)
+
+        return tool_defs, tool_callables
+
+    def _resolve_agent_tools(
+        self, ac, global_defs: list[dict], global_callables: dict[str, callable],
+    ) -> tuple[list[dict], dict[str, callable]]:
+        """Resolve per-agent tool set (global + extra - disabled)."""
+        defs = list(global_defs)
+        callables = dict(global_callables)
+
+        # Add extra tools
+        for tc in ac.extra_tools:
+            try:
+                cls = import_from_path(tc.path)
+                toolkit = cls()
+                for name, func in toolkit.functions.items():
+                    defs.append({
+                        "name": name,
+                        "description": func.description or "",
+                        "input_schema": func.parameters or {"type": "object", "properties": {}},
+                    })
+                    callables[name] = func.entrypoint
+                for name, func in toolkit.async_functions.items():
+                    if name not in callables or name not in [d["name"] for d in defs]:
+                        defs.append({
+                            "name": name,
+                            "description": func.description or "",
+                            "input_schema": func.parameters or {"type": "object", "properties": {}},
+                        })
+                    callables[name] = func.entrypoint
+            except Exception:
+                logger.warning("Failed to load extra tool %s", tc.path, exc_info=True)
+
+        # Remove disabled tools
+        if ac.disable_tools:
+            disable_names = set()
+            for path in ac.disable_tools:
+                try:
+                    cls = import_from_path(path)
+                    toolkit = cls()
+                    disable_names.update(toolkit.functions.keys())
+                    disable_names.update(toolkit.async_functions.keys())
+                except Exception:
+                    pass
+            defs = [d for d in defs if d["name"] not in disable_names]
+            for name in disable_names:
+                callables.pop(name, None)
+
+        return defs, callables
+
     def _create_conversations(self) -> None:
         """Create an AgentConversation for each configured agent."""
+        global_defs, global_callables = self._load_tools()
+
         for ac in self._config.agents:
+            agent_defs, agent_callables = self._resolve_agent_tools(
+                ac, global_defs, global_callables,
+            )
             self._conversations[ac.name] = AgentConversation(
                 agent_name=ac.name,
                 system_prompt=ac.system_prompt,
@@ -62,6 +151,8 @@ class DiscussionEngine:
                 base_url=self._config.model_config.base_url,
                 max_tokens=self._config.model_config.max_tokens or 4096,
                 temperature=self._config.model_config.temperature,
+                tools=agent_defs if agent_defs else None,
+                tool_callables=agent_callables if agent_callables else None,
             )
 
     async def _call_agent(self, agent_name: str, prompt: str) -> str | None:
