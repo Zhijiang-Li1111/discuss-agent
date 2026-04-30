@@ -1,0 +1,236 @@
+"""Integration tests for SharedFileEngine (engine_v2)."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from discuss_agent.claims import ClaimsManager
+from discuss_agent.config import (
+    AgentConfig,
+    DiscussionConfig,
+    HostConfig,
+    ModelConfig,
+    ToolConfig,
+)
+from discuss_agent.models import DiscussionResult
+
+
+def _make_v2_config(num_agents: int = 2, max_rounds: int = 3) -> DiscussionConfig:
+    agents = [
+        AgentConfig(
+            name=f"Agent-{chr(65 + i)}",
+            system_prompt=f"You are agent {chr(65 + i)}.",
+        )
+        for i in range(num_agents)
+    ]
+    return DiscussionConfig(
+        min_rounds=1,
+        max_rounds=max_rounds,
+        model_config=ModelConfig(model="claude-sonnet-4-20250514", api_key="test-key"),
+        agents=agents,
+        host=HostConfig(
+            convergence_prompt="Judge convergence.",
+            summary_prompt="Summarize.",
+            skip_summary=True,
+        ),
+        tools=[],
+        context={},
+        mode="shared_file",
+    )
+
+
+class TestSharedFileEngineIntegration:
+    """Test 2 agents running 2 rounds with CLAIM state transitions."""
+
+    @patch("discuss_agent.engine_v2.generate_usage_summary")
+    @patch("discuss_agent.engine_v2.AuditLogger")
+    @patch("discuss_agent.engine_v2.Archiver")
+    @patch("discuss_agent.engine_v2.ContextManager")
+    @patch("discuss_agent.engine_v2.AgentConversation")
+    @patch("discuss_agent.engine_v2.anthropic")
+    async def test_two_agents_two_rounds_convergence(
+        self,
+        mock_anthropic_mod,
+        MockConversation,
+        MockCtxMgr,
+        MockArchiver,
+        MockAuditLogger,
+        mock_usage_summary,
+    ):
+        from discuss_agent.engine_v2 import SharedFileEngine
+
+        config = _make_v2_config(num_agents=2, max_rounds=3)
+
+        # --- Mock Archiver ---
+        archiver_inst = MagicMock()
+        archiver_inst.start_session.return_value = "/tmp/test_session"
+        archiver_inst.save_round = MagicMock()
+        archiver_inst.save_context = MagicMock()
+        archiver_inst.save_summary = MagicMock()
+        MockArchiver.return_value = archiver_inst
+
+        # --- Mock AuditLogger ---
+        audit_inst = MagicMock()
+        MockAuditLogger.return_value = audit_inst
+
+        # --- Mock ContextManager ---
+        ctx_inst = MagicMock()
+        ctx_inst.build_initial_context = AsyncMock(return_value="猪周期分析议题")
+        MockCtxMgr.return_value = ctx_inst
+
+        # --- Mock AgentConversation ---
+        # Round 1: both agents propose claims
+        # Round 2: both agents accept each other's claims
+        call_counts = {"Agent-A": 0, "Agent-B": 0}
+
+        async def mock_send_factory(agent_name):
+            async def mock_send(prompt):
+                call_counts[agent_name] += 1
+                count = call_counts[agent_name]
+                if count == 1:
+                    # Round 1: propose claims
+                    if agent_name == "Agent-A":
+                        return "[NEW_CLAIM:能繁去化] 当前3904万头"
+                    else:
+                        return "[NEW_CLAIM:成本优势] 头均14.5元"
+                else:
+                    # Round 2: accept each other
+                    if agent_name == "Agent-A":
+                        return "[ACCEPT TO:成本优势] 招商证券确认"
+                    else:
+                        return "[ACCEPT TO:能繁去化] 农业部数据确认"
+            return mock_send
+
+        conversations = {}
+        def make_conv(**kwargs):
+            name = kwargs["agent_name"]
+            conv = MagicMock()
+            conv.agent_name = name
+            conv.messages = []
+
+            async def _send(prompt):
+                call_counts[name] += 1
+                count = call_counts[name]
+                if count == 1:
+                    if name == "Agent-A":
+                        return "[NEW_CLAIM:能繁去化] 当前3904万头"
+                    else:
+                        return "[NEW_CLAIM:成本优势] 头均14.5元"
+                else:
+                    if name == "Agent-A":
+                        return "[ACCEPT TO:成本优势] 招商证券确认"
+                    else:
+                        return "[ACCEPT TO:能繁去化] 农业部数据确认"
+
+            conv.send = AsyncMock(side_effect=_send)
+            conversations[name] = conv
+            return conv
+
+        MockConversation.side_effect = make_conv
+
+        # --- Mock host judge (Anthropic API) ---
+        # First call (after round 1): CONTINUE
+        # Second call (after round 2): close both claims
+        host_call_count = {"n": 0}
+
+        mock_host_response_1 = MagicMock()
+        mock_host_response_1.content = [
+            MagicMock(type="text", text='[{"claim":"能繁去化","verdict":"CLOSED:共识","reason":"双方一致"},{"claim":"成本优势","verdict":"CLOSED:共识","reason":"双方一致"}]')
+        ]
+
+        mock_host_response_2 = MagicMock()
+        mock_host_response_2.content = [
+            MagicMock(type="text", text='[{"claim":"能繁去化","verdict":"CLOSED:共识","reason":"双方一致"},{"claim":"成本优势","verdict":"CLOSED:共识","reason":"双方一致"}]')
+        ]
+
+        mock_client = MagicMock()
+
+        async def mock_create(**kwargs):
+            host_call_count["n"] += 1
+            if host_call_count["n"] <= 1:
+                return mock_host_response_1
+            return mock_host_response_2
+
+        mock_client.messages.create = AsyncMock(side_effect=mock_create)
+        mock_anthropic_mod.AsyncAnthropic.return_value = mock_client
+
+        # --- Run engine ---
+        engine = SharedFileEngine(config)
+        result = await engine.run()
+
+        # --- Assertions ---
+        assert result.converged is True
+        assert result.rounds_completed >= 2
+        assert result.remaining_disputes == []
+
+        # Verify agents were called (round 1 + round 2)
+        assert call_counts["Agent-A"] == 2
+        assert call_counts["Agent-B"] == 2
+
+    @patch("discuss_agent.engine_v2.generate_usage_summary")
+    @patch("discuss_agent.engine_v2.AuditLogger")
+    @patch("discuss_agent.engine_v2.Archiver")
+    @patch("discuss_agent.engine_v2.ContextManager")
+    @patch("discuss_agent.engine_v2.AgentConversation")
+    @patch("discuss_agent.engine_v2.anthropic")
+    async def test_max_rounds_without_convergence(
+        self,
+        mock_anthropic_mod,
+        MockConversation,
+        MockCtxMgr,
+        MockArchiver,
+        MockAuditLogger,
+        mock_usage_summary,
+    ):
+        from discuss_agent.engine_v2 import SharedFileEngine
+
+        config = _make_v2_config(num_agents=2, max_rounds=2)
+
+        archiver_inst = MagicMock()
+        archiver_inst.start_session.return_value = "/tmp/test_session2"
+        archiver_inst.save_round = MagicMock()
+        archiver_inst.save_context = MagicMock()
+        MockArchiver.return_value = archiver_inst
+
+        MockAuditLogger.return_value = MagicMock()
+
+        ctx_inst = MagicMock()
+        ctx_inst.build_initial_context = AsyncMock(return_value="议题")
+        MockCtxMgr.return_value = ctx_inst
+
+        call_counts = {"Agent-A": 0, "Agent-B": 0}
+
+        def make_conv(**kwargs):
+            name = kwargs["agent_name"]
+            conv = MagicMock()
+            conv.agent_name = name
+            conv.messages = []
+
+            async def _send(prompt):
+                call_counts[name] += 1
+                if call_counts[name] == 1:
+                    return f"[NEW_CLAIM:claim_{name}] content from {name}"
+                return f"[REBUTTAL TO:claim_Agent-{'B' if name == 'Agent-A' else 'A'}] disagree"
+
+            conv.send = AsyncMock(side_effect=_send)
+            return conv
+
+        MockConversation.side_effect = make_conv
+
+        # Host always says CONTINUE
+        mock_response = MagicMock()
+        mock_response.content = [
+            MagicMock(type="text", text='[{"claim":"claim_Agent-A","verdict":"CONTINUE","reason":""},{"claim":"claim_Agent-B","verdict":"CONTINUE","reason":""}]')
+        ]
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+        mock_anthropic_mod.AsyncAnthropic.return_value = mock_client
+
+        engine = SharedFileEngine(config)
+        result = await engine.run()
+
+        assert result.converged is False
+        assert result.rounds_completed == 2
+        assert len(result.remaining_disputes) > 0

@@ -10,7 +10,6 @@ import sys
 from datetime import datetime
 
 from discuss_agent.config import ConfigLoader
-from discuss_agent.engine import DiscussionEngine
 
 
 def _setup_logging() -> None:
@@ -78,16 +77,24 @@ def main() -> None:
     config = ConfigLoader.load(args.config)
 
     _setup_logging()
-    logging.info("Config loaded: %s", args.config)
+    logging.info("Config loaded: %s (mode: %s)", args.config, config.mode)
 
-    engine = DiscussionEngine(config)
-    result = asyncio.run(
-        engine.run(
-            resume_path=args.resume,
-            extra_rounds=args.rounds,
-            guidance=args.guidance,
+    if config.mode == "shared_file":
+        from discuss_agent.engine_v2 import SharedFileEngine
+
+        engine = SharedFileEngine(config)
+        result = asyncio.run(engine.run())
+    else:
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(config)
+        result = asyncio.run(
+            engine.run(
+                resume_path=args.resume,
+                extra_rounds=args.rounds,
+                guidance=args.guidance,
+            )
         )
-    )
 
     print(f"Discussion archived at: {result.archive_path}")
     if result.converged:

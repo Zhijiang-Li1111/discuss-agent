@@ -184,6 +184,7 @@ class DiscussionConfig:
     context_builder: str | None = None
     limitation: str | None = None
     skills: list[SkillConfig] | None = None
+    mode: str = "rounds"  # "rounds" (v1) or "shared_file" (v2)
 
 
 _REQUIRED_TOP_KEYS = ("agents", "host", "tools")
@@ -297,6 +298,13 @@ class ConfigLoader:
                 )
             skills.append(SkillConfig(path=entry["path"]))
 
+        # --- mode (optional, defaults to "rounds" for v1 compatibility) ---
+        mode: str = raw.get("mode", "rounds")
+        if mode not in ("rounds", "shared_file"):
+            raise ValueError(
+                f"Invalid mode '{mode}': must be 'rounds' or 'shared_file'"
+            )
+
         return DiscussionConfig(
             min_rounds=min_rounds,
             max_rounds=max_rounds,
@@ -308,4 +316,5 @@ class ConfigLoader:
             context_builder=context_builder,
             limitation=limitation,
             skills=skills if skills else None,
+            mode=mode,
         )

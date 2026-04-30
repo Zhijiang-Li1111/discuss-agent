@@ -524,10 +524,12 @@ class TestCLIResume:
                     "2",
                 ],
             ),
-            patch("discuss_agent.main.DiscussionEngine") as mock_engine_cls,
+            patch("discuss_agent.engine.DiscussionEngine") as mock_engine_cls,
             patch("discuss_agent.main.ConfigLoader") as mock_loader,
         ):
-            mock_loader.load.return_value = MagicMock()
+            mock_config = MagicMock()
+            mock_config.mode = "rounds"
+            mock_loader.load.return_value = mock_config
             mock_engine = MagicMock()
             mock_engine.run = AsyncMock(return_value=mock_result)
             mock_engine_cls.return_value = mock_engine
@@ -554,10 +556,12 @@ class TestCLIResume:
 
         with (
             patch("sys.argv", ["discuss_agent", sample_config_yaml]),
-            patch("discuss_agent.main.DiscussionEngine") as mock_engine_cls,
+            patch("discuss_agent.engine.DiscussionEngine") as mock_engine_cls,
             patch("discuss_agent.main.ConfigLoader") as mock_loader,
         ):
-            mock_loader.load.return_value = MagicMock()
+            mock_config = MagicMock()
+            mock_config.mode = "rounds"
+            mock_loader.load.return_value = mock_config
             mock_engine = MagicMock()
             mock_engine.run = AsyncMock(return_value=mock_result)
             mock_engine_cls.return_value = mock_engine
