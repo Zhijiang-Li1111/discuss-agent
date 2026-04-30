@@ -125,8 +125,8 @@ class AgentConversation:
             tool_results = []
             for block in tool_use_blocks:
                 logger.info(
-                    "Agent '%s' calling tool '%s'",
-                    self.agent_name, block.name,
+                    "Agent '%s' calling tool '%s' with args: %s",
+                    self.agent_name, block.name, block.input,
                 )
                 result_str = await self._execute_tool(block.name, block.input)
                 tool_results.append({
