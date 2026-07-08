@@ -170,5 +170,5 @@ discussion:
 skills: null
 tools:
 - path: discuss_tools.research_search.ResearchSearchTools
-- path: discuss_tools.web_search.WebSearchTools
+- path: discuss_tools.copilot_web_search.CopilotWebSearchTools
 - path: discuss_tools.file_read.FileReadTools

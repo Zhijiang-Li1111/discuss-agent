@@ -117,3 +117,7 @@ def _format_round_for_compression(record: RoundRecord) -> str:
         for u in record.challenges:
             parts.append(f"{u.agent_name}: {u.content}")
     return "\n".join(parts)
+
+async def simple_text_context(context: dict) -> str:
+    """Return raw text from config context for ad-hoc discussions."""
+    return context.get('text', '') or context.get('content', '') or ''
