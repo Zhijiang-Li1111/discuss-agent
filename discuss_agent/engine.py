@@ -11,9 +11,14 @@ import time as _time
 from dataclasses import asdict
 
 import anthropic
+import openai
 
 from discuss_agent.claims import AgentOutput, ClaimsManager
-from discuss_agent.config import DiscussionConfig, ModelConfig, build_claude
+from discuss_agent.config import (
+    DiscussionConfig,
+    infer_provider,
+    normalize_base_url,
+)
 from discuss_agent.context import ContextManager
 from discuss_agent.conversation import AgentConversation
 from discuss_agent.models import DiscussionResult
@@ -258,11 +263,52 @@ class DiscussionEngine:
                 return False
         return True
 
-    async def _host_judge(self, claims_mgr: ClaimsManager, round_num: int) -> list[dict]:
-        """Host LLM judges each OPEN claim.
+    def _create_host_client(self):
+        """Create a host client using the configured model's wire protocol."""
+        provider = infer_provider(self._host_model_config.model)
+        client_kwargs: dict = {"timeout": 600.0}
+        if self._host_model_config.api_key:
+            client_kwargs["api_key"] = self._host_model_config.api_key
+        base_url = normalize_base_url(self._host_model_config.base_url, provider)
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        if provider == "openai":
+            return openai.AsyncOpenAI(**client_kwargs)
+        return anthropic.AsyncAnthropic(**client_kwargs)
 
-        Returns list of {claim, verdict, reason} dicts.
-        """
+    async def _call_host(self, system_prompt: str, prompt: str) -> str:
+        """Run one host request and extract text from either protocol."""
+        provider = infer_provider(self._host_model_config.model)
+        client = self._create_host_client()
+        if provider == "openai":
+            kwargs: dict = {
+                "model": self._host_model_config.model,
+                "max_tokens": self._host_model_config.max_tokens or 4096,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            if self._host_model_config.temperature is not None:
+                kwargs["temperature"] = self._host_model_config.temperature
+            response = await client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content or ""
+
+        kwargs = {
+            "model": self._host_model_config.model,
+            "max_tokens": self._host_model_config.max_tokens or 4096,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if self._host_model_config.temperature is not None:
+            kwargs["temperature"] = self._host_model_config.temperature
+        response = await client.messages.create(**kwargs)
+        return "".join(
+            block.text for block in response.content if block.type == "text"
+        )
+
+    async def _host_judge(self, claims_mgr: ClaimsManager, round_num: int) -> list[dict]:
+        """Host LLM judges each OPEN claim."""
         logger.info("=== HOST JUDGE (Round %d) ===", round_num)
         open_claims = claims_mgr.get_open_claims()
         if not open_claims:
@@ -277,70 +323,27 @@ class DiscussionEngine:
             f"- CONTINUE — 仍需讨论\n\n"
             f'输出 JSON 数组: [{{"claim": "关键词", "verdict": "CLOSED:共识", "reason": "..."}}]'
         )
-
-        # Use a one-shot Anthropic call for host (no multi-turn needed)
-        client_kwargs: dict = {"timeout": 600.0}
-        if self._host_model_config.api_key:
-            client_kwargs["api_key"] = self._host_model_config.api_key
-        if self._host_model_config.base_url:
-            client_kwargs["base_url"] = self._host_model_config.base_url
-        client = anthropic.AsyncAnthropic(**client_kwargs)
-
-        kwargs: dict = {
-            "model": self._host_model_config.model,
-            "max_tokens": self._host_model_config.max_tokens or 4096,
-            "system": self._config.host.convergence_prompt,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if self._host_model_config.temperature is not None:
-            kwargs["temperature"] = self._host_model_config.temperature
-
         for attempt in range(2):
             try:
-                response = await client.messages.create(**kwargs)
-                text = ""
-                for block in response.content:
-                    if block.type == "text":
-                        text += block.text
-
-                # Extract JSON array from response
+                text = await self._call_host(
+                    self._config.host.convergence_prompt, prompt
+                )
                 match = re.search(r"\[.*\]", text, re.DOTALL)
                 if match:
-                    verdicts = json.loads(match.group())
-                    return verdicts
+                    return json.loads(match.group())
             except Exception:
                 if attempt == 0:
                     continue
         return []
 
     async def _host_summarize(self, claims_mgr: ClaimsManager) -> str:
-        """Host generates final summary."""
+        """Host generates final summary using its configured protocol."""
         logger.info("=== HOST SUMMARIZE ===")
-        all_claims_text = claims_mgr.format_file()
-
-        client_kwargs: dict = {"timeout": 600.0}
-        if self._host_model_config.api_key:
-            client_kwargs["api_key"] = self._host_model_config.api_key
-        if self._host_model_config.base_url:
-            client_kwargs["base_url"] = self._host_model_config.base_url
-        client = anthropic.AsyncAnthropic(**client_kwargs)
-
         prompt = (
-            f"以下是完整的讨论记录：\n\n{all_claims_text}\n\n"
+            f"以下是完整的讨论记录：\n\n{claims_mgr.format_file()}\n\n"
             f"讨论已经结束。请基于各方达成的共识和记录的分歧输出总结。"
         )
-
-        response = await client.messages.create(
-            model=self._host_model_config.model,
-            max_tokens=self._host_model_config.max_tokens or 4096,
-            system=self._config.host.summary_prompt,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text_parts = []
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-        return "\n".join(text_parts)
+        return await self._call_host(self._config.host.summary_prompt, prompt)
 
     async def run(self) -> DiscussionResult:
         """Run the full shared-file discussion loop."""

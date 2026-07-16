@@ -8,6 +8,9 @@ from discuss_agent.config import (
     ModelConfig,
     ToolConfig,
     build_claude,
+    build_model,
+    infer_provider,
+    normalize_base_url,
     resolve_env,
 )
 from discuss_agent.engine import DiscussionEngine
@@ -26,6 +29,9 @@ __all__ = [
     "RoundRecord",
     "ToolConfig",
     "build_claude",
+    "build_model",
+    "infer_provider",
+    "normalize_base_url",
     "import_from_path",
     "resolve_env",
 ]

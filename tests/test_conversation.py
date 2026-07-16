@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -272,3 +274,102 @@ class TestConversationToolLoop:
         assert len(conv.messages) == 4  # user, assistant, user, assistant
         assert conv.messages[0]["content"] == "msg1"
         assert conv.messages[2]["content"] == "msg2"
+
+
+def _make_openai_response(content=None, tool_calls=None):
+    message = SimpleNamespace(content=content, tool_calls=tool_calls or [])
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def _make_openai_tool_call(call_id: str, name: str, arguments: dict):
+    return SimpleNamespace(
+        id=call_id,
+        type="function",
+        function=SimpleNamespace(name=name, arguments=json.dumps(arguments)),
+    )
+
+
+class TestOpenAIConversation:
+    """OpenAI-compatible messages and function-tool loop."""
+
+    async def test_no_tools_returns_text_and_preserves_multiturn_history(self):
+        conv = AgentConversation(
+            agent_name="OpenAI-Agent",
+            system_prompt="system",
+            model="agent-maestro-openai/gpt-5.5",
+            api_key="dummy",
+            base_url="http://localhost:23333/api/anthropic",
+        )
+        conv._client = MagicMock()
+        conv._client.chat.completions.create = AsyncMock(side_effect=[
+            _make_openai_response("first reply"),
+            _make_openai_response("second reply"),
+        ])
+
+        assert await conv.send("first") == "first reply"
+        assert await conv.send("second") == "second reply"
+
+        second_kwargs = conv._client.chat.completions.create.await_args_list[1].kwargs
+        assert second_kwargs["messages"] == [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "first reply"},
+            {"role": "user", "content": "second"},
+        ]
+
+    async def test_tool_loop_converts_schema_and_appends_tool_messages(self):
+        def search(query: str) -> dict:
+            return {"answer": f"found {query}"}
+
+        conv = AgentConversation(
+            agent_name="OpenAI-Agent",
+            system_prompt="system",
+            model="agent-maestro-openai/gpt-5.5",
+            api_key="dummy",
+            base_url="http://localhost:23333/api/anthropic",
+            tools=[{
+                "name": "search",
+                "description": "Search reports",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            }],
+            tool_callables={"search": search},
+        )
+        conv._client = MagicMock()
+        conv._client.chat.completions.create = AsyncMock(side_effect=[
+            _make_openai_response(
+                tool_calls=[_make_openai_tool_call("call_1", "search", {"query": "DRAM"})]
+            ),
+            _make_openai_response("final answer"),
+        ])
+
+        assert await conv.send("research") == "final answer"
+
+        first_kwargs = conv._client.chat.completions.create.await_args_list[0].kwargs
+        assert first_kwargs["tools"] == [{
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search reports",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            },
+        }]
+
+        assert conv.messages[1]["role"] == "assistant"
+        assert conv.messages[1]["tool_calls"][0]["id"] == "call_1"
+        assert conv.messages[2] == {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": '{"answer": "found DRAM"}',
+        }
+
+        second_kwargs = conv._client.chat.completions.create.await_args_list[1].kwargs
+        assert second_kwargs["messages"][0] == {"role": "system", "content": "system"}
+        assert second_kwargs["messages"][3]["role"] == "tool"

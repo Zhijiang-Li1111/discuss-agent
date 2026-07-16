@@ -198,3 +198,54 @@ class TestDiscussionEngineIntegration:
         assert result.converged is False
         assert result.rounds_completed == 2
         assert len(result.remaining_disputes) > 0
+
+
+class TestOpenAIHostRouting:
+    """Host judge and summary use the OpenAI-compatible protocol when configured."""
+
+    @patch("discuss_agent.engine.openai.AsyncOpenAI")
+    async def test_openai_host_judge_and_summary(self, MockAsyncOpenAI):
+        from types import SimpleNamespace
+
+        from discuss_agent.engine import DiscussionEngine
+
+        config = _make_config(num_agents=1)
+        config.model_config = ModelConfig(
+            model="agent-maestro-openai/gpt-5.5",
+            api_key="dummy",
+            base_url="http://localhost:23333/api/anthropic",
+            max_tokens=100,
+        )
+        config.host.skip_summary = False
+
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=[
+            SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content='[{"claim":"cost","verdict":"CLOSED:共识","reason":"ok"}]'
+            ))]),
+            SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content="host summary"
+            ))]),
+        ])
+        MockAsyncOpenAI.return_value = client
+
+        claim = MagicMock()
+        claim.format.return_value = "## [OPEN] cost"
+        claims_mgr = MagicMock()
+        claims_mgr.get_open_claims.return_value = [claim]
+        claims_mgr.format_file.return_value = "all claims"
+
+        engine = DiscussionEngine(config)
+        verdicts = await engine._host_judge(claims_mgr, round_num=2)
+        summary = await engine._host_summarize(claims_mgr)
+
+        assert verdicts[0]["claim"] == "cost"
+        assert summary == "host summary"
+        assert MockAsyncOpenAI.call_args.kwargs["base_url"] == (
+            "http://localhost:23333/api/openai/v1"
+        )
+        assert client.chat.completions.create.await_count == 2
+        judge_messages = client.chat.completions.create.await_args_list[0].kwargs["messages"]
+        summary_messages = client.chat.completions.create.await_args_list[1].kwargs["messages"]
+        assert judge_messages[0] == {"role": "system", "content": "Judge convergence."}
+        assert summary_messages[0] == {"role": "system", "content": "Summarize."}

@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 from agno.models.anthropic import Claude
+from agno.models.openai import OpenAIChat
 
 
 # ---------------------------------------------------------------------------
@@ -109,23 +110,56 @@ class ModelConfig:
         return d
 
 
-def build_claude(model_config: ModelConfig) -> Claude:
-    """Create an Agno Claude instance from a ModelConfig."""
-    kwargs: dict[str, Any] = {"id": model_config.model}
+def infer_provider(model: str) -> str:
+    """Infer the wire protocol provider from a configured model name.
+
+    Maestro exposes explicit provider-prefixed model IDs.  All existing model
+    names remain Anthropic by default so legacy Claude configurations preserve
+    their current behaviour.
+    """
+    if model.lower().startswith("agent-maestro-openai/"):
+        return "openai"
+    return "anthropic"
+
+
+def normalize_base_url(base_url: str | None, provider: str) -> str | None:
+    """Normalize legacy Maestro URLs for the selected wire protocol."""
+    if base_url is None:
+        return None
+    normalized = base_url.rstrip("/")
+    if provider == "openai" and normalized.endswith("/api/anthropic"):
+        return normalized[: -len("/api/anthropic")] + "/api/openai/v1"
+    return normalized if base_url.endswith("/") else base_url
+
+
+def build_model(model_config: ModelConfig) -> Claude | OpenAIChat:
+    """Create an Agno model using the protocol implied by ``model``."""
+    provider = infer_provider(model_config.model)
+    base_url = normalize_base_url(model_config.base_url, provider)
+    common: dict[str, Any] = {"id": model_config.model}
     if model_config.api_key is not None:
-        kwargs["api_key"] = model_config.api_key
+        common["api_key"] = model_config.api_key
     if model_config.temperature is not None:
-        kwargs["temperature"] = model_config.temperature
+        common["temperature"] = model_config.temperature
     if model_config.max_tokens is not None:
-        kwargs["max_tokens"] = model_config.max_tokens
-    client_params: dict[str, Any] = {}
-    if model_config.base_url is not None:
-        client_params["base_url"] = model_config.base_url
-    # Long timeout for large-context requests (research reports can be 40k+ chars)
-    client_params["timeout"] = 600.0
-    if client_params:
-        kwargs["client_params"] = client_params
-    return Claude(**kwargs)
+        common["max_tokens"] = model_config.max_tokens
+
+    if provider == "openai":
+        if base_url is not None:
+            common["base_url"] = base_url
+        common["timeout"] = 600.0
+        return OpenAIChat(**common)
+
+    client_params: dict[str, Any] = {"timeout": 600.0}
+    if base_url is not None:
+        client_params["base_url"] = base_url
+    common["client_params"] = client_params
+    return Claude(**common)
+
+
+def build_claude(model_config: ModelConfig) -> Claude | OpenAIChat:
+    """Compatibility alias for the now provider-aware Agno model builder."""
+    return build_model(model_config)
 
 
 @dataclass

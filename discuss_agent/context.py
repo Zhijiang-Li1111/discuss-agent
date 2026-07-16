@@ -79,14 +79,14 @@ class ContextManager:
     async def _compress_round(self, round_text: str) -> str:
         """Compress a single round's text using an LLM agent."""
         from agno.agent import Agent
-        from discuss_agent.config import build_claude
+        from discuss_agent.config import build_model
 
         # Create a fresh agent each time to avoid session accumulation.
         # This is intentional: compression is infrequent and the agent is
         # lightweight (no tools, no history).
         agent = Agent(
             name="Compressor",
-            model=build_claude(self._config.model_config),
+            model=build_model(self._config.model_config),
             system_message=(
                 "你是一个讨论记录压缩助手。你的任务是将一轮讨论的完整发言"
                 "浓缩为一段简洁的摘要，帮助后续讨论者快速了解此前的要点。\n\n"

@@ -5,10 +5,13 @@ import pytest
 
 from discuss_agent.config import (
     AgentConfig,
+    build_model,
     ConfigLoader,
     DiscussionConfig,
     HostConfig,
+    infer_provider,
     ModelConfig,
+    normalize_base_url,
     ToolConfig,
     resolve_env,
     _resolve_template_vars,
@@ -283,6 +286,49 @@ class TestModelConfig:
         mc = ModelConfig(model="m")
         safe = mc.to_safe_dict()
         assert safe["api_key"] is None
+
+
+class TestProviderRouting:
+    """Provider inference and legacy Maestro URL compatibility."""
+
+    def test_agent_maestro_openai_model_uses_openai(self):
+        assert infer_provider("agent-maestro-openai/gpt-5.5") == "openai"
+
+    def test_claude_model_uses_anthropic(self):
+        assert infer_provider("claude-sonnet-4-20250514") == "anthropic"
+
+    @pytest.mark.parametrize(
+        ("base_url", "expected"),
+        [
+            (
+                "http://localhost:23333/api/anthropic",
+                "http://localhost:23333/api/openai/v1",
+            ),
+            (
+                "http://localhost:23333/api/anthropic/",
+                "http://localhost:23333/api/openai/v1",
+            ),
+            (
+                "http://localhost:23333/api/openai/v1",
+                "http://localhost:23333/api/openai/v1",
+            ),
+        ],
+    )
+    def test_openai_legacy_base_url_normalized(self, base_url, expected):
+        assert normalize_base_url(base_url, "openai") == expected
+
+    def test_anthropic_base_url_unchanged(self):
+        url = "http://localhost:23333/api/anthropic"
+        assert normalize_base_url(url, "anthropic") == url
+
+    def test_build_model_selects_openai_compatible_model(self):
+        model = build_model(ModelConfig(
+            model="agent-maestro-openai/gpt-5.5",
+            api_key="dummy",
+            base_url="http://localhost:23333/api/anthropic",
+        ))
+        assert model.__class__.__name__ == "OpenAIChat"
+        assert str(model.base_url) == "http://localhost:23333/api/openai/v1"
 
 
 # ---------------------------------------------------------------------------
