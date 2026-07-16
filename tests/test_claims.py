@@ -253,6 +253,32 @@ class TestSaveLoad:
 
 
 # ---------------------------------------------------------------------------
+# ClaimsManager — generate_initial_prompt
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateInitialPrompt:
+    def test_includes_full_context(self):
+        mgr = ClaimsManager()
+        prompt = mgr.generate_initial_prompt(
+            "OCR 策略",
+            limitation="全部文件必须入库",
+            context="成本事实：12,823 页，119.28 美元",
+        )
+
+        assert "议题：OCR 策略" in prompt
+        assert "全部文件必须入库" in prompt
+        assert "## 已确认背景材料" in prompt
+        assert "12,823 页" in prompt
+
+    def test_context_is_optional(self):
+        mgr = ClaimsManager()
+        prompt = mgr.generate_initial_prompt("OCR 策略")
+        assert "议题：OCR 策略" in prompt
+        assert "已确认背景材料" not in prompt
+
+
+# ---------------------------------------------------------------------------
 # ClaimsManager — generate_update_prompt
 # ---------------------------------------------------------------------------
 

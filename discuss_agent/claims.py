@@ -307,12 +307,19 @@ class ClaimsManager:
 
         return "\n".join(parts)
 
-    def generate_initial_prompt(self, topic: str, limitation: str | None = None) -> str:
+    def generate_initial_prompt(
+        self,
+        topic: str,
+        limitation: str | None = None,
+        context: str | None = None,
+    ) -> str:
         """Generate the initial prompt for Round 1."""
         parts = []
         if limitation:
             parts.append(f"⚠️ 本次讨论范围仅限于：{limitation}\n")
         parts.append(f"议题：{topic}\n")
+        if context:
+            parts.append(f"## 已确认背景材料\n\n{context.strip()}\n")
         parts.append(
             "请基于你的专业分析提出观点。\n\n"
             "**输出格式要求：**\n"

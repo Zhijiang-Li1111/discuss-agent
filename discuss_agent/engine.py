@@ -196,12 +196,14 @@ class DiscussionEngine:
         return None
 
     async def _round_1(
-        self, claims_mgr: ClaimsManager, topic: str,
+        self, claims_mgr: ClaimsManager, topic: str, context: str = "",
     ) -> list[AgentOutput]:
         """Round 1: each agent proposes initial claims."""
         logger.info("=== Round 1: Initial claims ===")
         prompt = claims_mgr.generate_initial_prompt(
-            topic, limitation=self._config.limitation,
+            topic,
+            limitation=self._config.limitation,
+            context=context,
         )
 
         async def call_one(name: str) -> AgentOutput | None:
@@ -368,7 +370,7 @@ class DiscussionEngine:
 
         try:
             # Round 1: agents propose initial claims
-            outputs = await self._round_1(claims_mgr, topic)
+            outputs = await self._round_1(claims_mgr, topic, context)
             claims_mgr.merge_round(outputs)
             self._archiver.save_round(1, "agents", {
                 "outputs": [
