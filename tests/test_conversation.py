@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import json
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from agno.media import Image
+from agno.tools.function import ToolResult
+from PIL import Image as PILImage
 
 from discuss_agent.conversation import AgentConversation
 
@@ -373,3 +378,50 @@ class TestOpenAIConversation:
         second_kwargs = conv._client.chat.completions.create.await_args_list[1].kwargs
         assert second_kwargs["messages"][0] == {"role": "system", "content": "system"}
         assert second_kwargs["messages"][3]["role"] == "tool"
+
+
+class TestToolResultMedia:
+    @staticmethod
+    def _image_bytes(fmt="PNG"):
+        output = BytesIO()
+        PILImage.new("RGB", (4, 3), "white").save(output, format=fmt)
+        return output.getvalue()
+
+    async def test_anthropic_tool_result_contains_image(self):
+        png = self._image_bytes()
+        conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tools=[{"name":"page","description":"page","input_schema":{}}],
+            tool_callables={"page": lambda: ToolResult(content='{"page":68}', images=[Image(content=png)])})
+        conv._client = MagicMock()
+        conv._client.messages.create = AsyncMock(side_effect=[
+            _make_response(_make_tool_use_block("c1","page",{})), _make_response(_make_text_block("done"))])
+        assert await conv.send("read") == "done"
+        payload = conv.messages[2]["content"][0]["content"]
+        assert payload[1]["type"] == "image"
+        assert base64.b64decode(payload[1]["source"]["data"]) == png
+
+    async def test_openai_batches_tools_before_image(self):
+        jpeg = self._image_bytes("JPEG")
+        conv = AgentConversation(agent_name="media", system_prompt="system",
+            model="agent-maestro-openai/gpt-5.5", api_key="dummy",
+            tools=[{"name":"page","description":"page","input_schema":{}},{"name":"text","description":"text","input_schema":{}}],
+            tool_callables={"page": lambda: ToolResult(content="page", images=[Image(content=jpeg)]), "text": lambda:"plain"})
+        conv._client = MagicMock()
+        conv._client.chat.completions.create = AsyncMock(side_effect=[
+            _make_openai_response(tool_calls=[_make_openai_tool_call("c1","page",{}),_make_openai_tool_call("c2","text",{})]),
+            _make_openai_response("done")])
+        assert await conv.send("read") == "done"
+        assert [m["role"] for m in conv.messages[1:5]] == ["assistant","tool","tool","user"]
+        assert conv.messages[4]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    @pytest.mark.parametrize("payload", [b"not-image", b"\x89PNG\r\n\x1a\ntruncated", b"\xff\xd8\xfftruncated"])
+    async def test_invalid_image_visible_error(self, payload):
+        conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tools=[{"name":"page","description":"page","input_schema":{}}],
+            tool_callables={"page": lambda: ToolResult(content="page", images=[Image(content=payload)])})
+        conv._client = MagicMock()
+        conv._client.messages.create = AsyncMock(side_effect=[
+            _make_response(_make_tool_use_block("c1","page",{})), _make_response(_make_text_block("handled"))])
+        assert await conv.send("read") == "handled"
+        text = conv.messages[2]["content"][0]["content"]
+        assert "complete valid PNG or JPEG" in text

@@ -5,6 +5,7 @@ description = "Generic multi-agent adversarial discussion framework"
 requires-python = ">=3.12"
 dependencies = [
     "agno",
+    "pillow",
     "pyyaml",
 ]
 
