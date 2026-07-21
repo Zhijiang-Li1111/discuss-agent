@@ -384,9 +384,9 @@ class TestOpenAIConversation:
 
 class TestToolResultMedia:
     @staticmethod
-    def _image_bytes(fmt="PNG"):
+    def _image_bytes(fmt="PNG", size=(4, 3)):
         output = BytesIO()
-        PILImage.new("RGB", (4, 3), "white").save(output, format=fmt)
+        PILImage.new("RGB", size, "white").save(output, format=fmt)
         return output.getvalue()
 
     async def test_anthropic_tool_result_contains_image(self):
@@ -559,6 +559,36 @@ class TestToolResultMedia:
         ]
         assert "3 image" in conv.messages[3]["content"]
         assert len(conv.messages[4]["content"]) == 3
+
+    async def test_filepath_read_is_bounded_even_if_file_grows(self, tmp_path, monkeypatch):
+        path = tmp_path / "page.png"
+        path.write_bytes(self._image_bytes())
+        original_open = Path.open
+
+        class GrowingReader:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size=-1):
+                assert size == 5 * 1024 * 1024 + 1
+                return b"x" * size
+
+        def growing_open(candidate, *args, **kwargs):
+            if candidate == path:
+                return GrowingReader()
+            return original_open(candidate, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", growing_open)
+        conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tool_callables={"tool": lambda: ToolResult(content="page", images=[Image(filepath=path)])})
+
+        result = await conv._execute_tool("tool", {})
+
+        assert result.images == ()
+        assert "5 MiB" in result.text
 
     async def test_oversized_filepath_rejected_before_read(self, tmp_path, monkeypatch):
         path = tmp_path / "large.png"

@@ -122,7 +122,8 @@ class AgentConversation:
             path = Path(image.filepath)
             if path.stat().st_size > _MAX_TOOL_IMAGE_BYTES:
                 raise ValueError("tool image exceeds 5 MiB limit")
-            data = path.read_bytes()
+            with path.open("rb") as image_file:
+                data = image_file.read(_MAX_TOOL_IMAGE_BYTES + 1)
         if not isinstance(data, bytes) or not data:
             raise ValueError("tool image has no local bytes")
         if len(data) > _MAX_TOOL_IMAGE_BYTES:
