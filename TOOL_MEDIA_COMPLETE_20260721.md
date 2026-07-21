@@ -4,7 +4,8 @@
 
 - Provider-neutral media bridge: `a53d9c78b0401bfadacb4af842a6906781538937`
 - Integrity validation: `cfca0c213dd680adc193fc63bb359350144c8ce7`
-- Review hardening: `628e927`
+- Review hardening: `628e92775544780fcca4b40c9f5467ec81b52539`
+- Runtime dependency and bounded-read closure: `ab81ae0`
 
 ## Behavior
 
@@ -12,15 +13,18 @@
 - Anthropic receives base64 PNG/JPEG image blocks within `tool_result` content.
 - OpenAI receives every paired `tool` message first, followed by one user multimodal data-URI message; history remains provider-valid across later turns.
 - Local content/filepath PNG and JPEG are supported. Remote URLs, corrupt/truncated media, files over 5 MiB, decoded images over 25 million pixels, and more than three images per model turn produce visible tool errors.
-- Pillow is an explicit dependency and validates real image fixtures; PNG IEND and JPEG EOI checks reject incomplete streams.
+- Pillow, Anthropic, and OpenAI are explicit production dependencies recorded in `uv.lock`.
+- Pillow fully decodes real PNG/JPEG fixtures after checking format, dimensions, and pixel bounds; PNG IEND and JPEG EOI checks reject incomplete streams.
+- Filepath media is read with a 5 MiB + 1 byte bound, including files that grow after the initial size check.
 
 ## Verification evidence
 
-- Targeted conversation suite: `27 passed in 1.64s`.
-- Full suite command: `uv run --with anthropic --with openai pytest -q`.
-- Full suite result: `168 passed in 1.85s`.
-- Independent spec review: pass.
-- Independent code-quality review: pass after fixing empty Anthropic text blocks, pre-decode pixel limits, and awaitable callable objects.
+- Fresh focused command: `uv run pytest -q tests/test_conversation.py -k 'ToolResultMedia'`.
+- Fresh focused result: `17 passed, 11 deselected in 1.40s`.
+- Fresh full-suite command: `uv run pytest -q`.
+- Fresh full-suite result: `169 passed in 1.90s`.
+- Fresh independent spec review: pass.
+- Fresh independent code-quality review: pass after explicit runtime dependencies and bounded filepath reads; no Critical or Important findings remain.
 - Media history was intentionally retained because multi-turn preservation is an explicit requirement; pruning it would violate the requested behavior.
 
 ## Actual Maestro E2E
