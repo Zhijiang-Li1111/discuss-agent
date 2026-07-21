@@ -414,8 +414,9 @@ class TestToolResultMedia:
         assert [m["role"] for m in conv.messages[1:5]] == ["assistant","tool","tool","user"]
         assert conv.messages[4]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
-    @pytest.mark.parametrize("payload", [b"not-image", b"\x89PNG\r\n\x1a\ntruncated", b"\xff\xd8\xfftruncated"])
-    async def test_invalid_image_visible_error(self, payload):
+    @pytest.mark.parametrize("format", ["PNG", "JPEG"])
+    async def test_truncated_real_image_visible_error(self, format):
+        payload = self._image_bytes(format)[:-12]
         conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
             tools=[{"name":"page","description":"page","input_schema":{}}],
             tool_callables={"page": lambda: ToolResult(content="page", images=[Image(content=payload)])})
@@ -425,3 +426,53 @@ class TestToolResultMedia:
         assert await conv.send("read") == "handled"
         text = conv.messages[2]["content"][0]["content"]
         assert "complete valid PNG or JPEG" in text
+
+    async def test_legacy_results_and_local_filepath(self, tmp_path):
+        png = self._image_bytes()
+        path = tmp_path / "page.png"
+        path.write_bytes(png)
+        string_conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tool_callables={"tool": lambda: "plain"})
+        dict_conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tool_callables={"tool": lambda: {"answer": 42}})
+        file_conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tool_callables={"tool": lambda: ToolResult(content="page", images=[Image(filepath=path)])})
+
+        assert (await string_conv._execute_tool("tool", {})).text == "plain"
+        assert (await dict_conv._execute_tool("tool", {})).text == '{"answer": 42}'
+        assert (await file_conv._execute_tool("tool", {})).images[0].data == png
+
+    @pytest.mark.parametrize(
+        ("images", "error"),
+        [
+            ([Image(url="https://example.com/image.png")], "remote image URLs"),
+            ([Image(content=b"x" * (5 * 1024 * 1024 + 1))], "5 MiB"),
+            ([Image(content=b"unused") for _ in range(4)], "3 image"),
+        ],
+    )
+    async def test_rejected_media_is_visible_and_not_forwarded(self, images, error):
+        conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tool_callables={"tool": lambda: ToolResult(content="page", images=images)})
+
+        result = await conv._execute_tool("tool", {})
+
+        assert result.images == ()
+        assert error in result.text
+
+    async def test_openai_media_history_is_preserved_on_next_turn(self):
+        png = self._image_bytes()
+        conv = AgentConversation(agent_name="media", system_prompt="system",
+            model="agent-maestro-openai/gpt-5.5", api_key="dummy",
+            tools=[{"name":"page","description":"page","input_schema":{}}],
+            tool_callables={"page": lambda: ToolResult(content="page", images=[Image(content=png)])})
+        conv._client = MagicMock()
+        conv._client.chat.completions.create = AsyncMock(side_effect=[
+            _make_openai_response(tool_calls=[_make_openai_tool_call("c1", "page", {})]),
+            _make_openai_response("seen"),
+            _make_openai_response("remembered"),
+        ])
+
+        assert await conv.send("read") == "seen"
+        assert await conv.send("recall") == "remembered"
+        third_messages = conv._client.chat.completions.create.await_args_list[2].kwargs["messages"]
+        assert third_messages[3:6] == conv.messages[2:5]

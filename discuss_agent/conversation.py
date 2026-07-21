@@ -132,8 +132,14 @@ class AgentConversation:
         except (UnidentifiedImageError, OSError, ValueError) as exc:
             raise ValueError("image must be a complete valid PNG or JPEG") from exc
         if fmt == "PNG":
+            # Pillow may decode a truncated PNG without its terminal IEND chunk.
+            if not data.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82"):
+                raise ValueError("image must be a complete valid PNG or JPEG")
             media_type = "image/png"
         elif fmt in {"JPEG", "JPG"}:
+            # A complete JPEG stream terminates with the EOI marker.
+            if not data.endswith(b"\xff\xd9"):
+                raise ValueError("image must be a complete valid PNG or JPEG")
             media_type = "image/jpeg"
         else:
             raise ValueError("only PNG and JPEG tool images are supported")
