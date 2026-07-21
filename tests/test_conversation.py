@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,7 @@ from agno.media import Image
 from agno.tools.function import ToolResult
 from PIL import Image as PILImage
 
+import discuss_agent.conversation as conversation_module
 from discuss_agent.conversation import AgentConversation
 
 
@@ -458,6 +460,124 @@ class TestToolResultMedia:
 
         assert result.images == ()
         assert error in result.text
+
+    async def test_corrupt_real_images_with_terminal_markers_are_rejected(self):
+        for format in ("PNG", "JPEG"):
+            original = self._image_bytes(format)
+            trailer_size = 12 if format == "PNG" else 2
+            payload = original[:20] + original[-trailer_size:]
+            conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+                tool_callables={"tool": lambda data=bytes(payload): ToolResult(
+                    content="page", images=[Image(content=data)]
+                )})
+
+            result = await conv._execute_tool("tool", {})
+
+            assert result.images == ()
+            assert "complete valid PNG or JPEG" in result.text
+
+    async def test_multiple_tool_results_cannot_exceed_turn_image_limit(self):
+        png = self._image_bytes()
+        conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tools=[{"name":"a","description":"a","input_schema":{}},{"name":"b","description":"b","input_schema":{}}],
+            tool_callables={
+                "a": lambda: ToolResult(content="a", images=[Image(content=png), Image(content=png)]),
+                "b": lambda: ToolResult(content="b", images=[Image(content=png), Image(content=png)]),
+            })
+        conv._client = MagicMock()
+        conv._client.messages.create = AsyncMock(side_effect=[
+            _make_response(_make_tool_use_block("c1", "a", {}), _make_tool_use_block("c2", "b", {})),
+            _make_response(_make_text_block("handled")),
+        ])
+
+        assert await conv.send("read") == "handled"
+        results = conv.messages[2]["content"]
+        assert sum(
+            block["type"] == "image"
+            for result in results
+            for block in result["content"]
+            if isinstance(result["content"], list)
+        ) <= 3
+        assert any("3 image" in str(result["content"]) for result in results)
+
+    async def test_anthropic_image_only_result_omits_empty_text_block(self):
+        png = self._image_bytes()
+        conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tools=[{"name":"page","description":"page","input_schema":{}}],
+            tool_callables={"page": lambda: ToolResult(content="", images=[Image(content=png)])})
+        conv._client = MagicMock()
+        conv._client.messages.create = AsyncMock(side_effect=[
+            _make_response(_make_tool_use_block("c1", "page", {})),
+            _make_response(_make_text_block("seen")),
+        ])
+
+        assert await conv.send("read") == "seen"
+        content = conv.messages[2]["content"][0]["content"]
+        assert [block["type"] for block in content] == ["image"]
+
+    async def test_async_callable_object_is_awaited(self):
+        class AsyncTool:
+            async def __call__(self):
+                return "awaited"
+
+        conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tool_callables={"tool": AsyncTool()})
+
+        assert (await conv._execute_tool("tool", {})).text == "awaited"
+
+    async def test_decompression_bomb_returns_visible_error(self, monkeypatch):
+        png = self._image_bytes()
+        monkeypatch.setattr(conversation_module, "_MAX_TOOL_IMAGE_PIXELS", 1)
+        conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tool_callables={"tool": lambda: ToolResult(content="page", images=[Image(content=png)])})
+
+        result = await conv._execute_tool("tool", {})
+
+        assert result.images == ()
+        assert "safe pixel limit" in result.text
+
+    async def test_openai_multiple_tools_enforce_turn_image_limit(self):
+        png = self._image_bytes()
+        conv = AgentConversation(agent_name="media", system_prompt="system",
+            model="agent-maestro-openai/gpt-5.5", api_key="dummy",
+            tools=[{"name":"a","description":"a","input_schema":{}},{"name":"b","description":"b","input_schema":{}}],
+            tool_callables={
+                "a": lambda: ToolResult(content="a", images=[Image(content=png), Image(content=png)]),
+                "b": lambda: ToolResult(content="b", images=[Image(content=png), Image(content=png)]),
+            })
+        conv._client = MagicMock()
+        conv._client.chat.completions.create = AsyncMock(side_effect=[
+            _make_openai_response(tool_calls=[
+                _make_openai_tool_call("c1", "a", {}), _make_openai_tool_call("c2", "b", {})
+            ]),
+            _make_openai_response("handled"),
+        ])
+
+        assert await conv.send("read") == "handled"
+        assert [message["role"] for message in conv.messages[1:5]] == [
+            "assistant", "tool", "tool", "user"
+        ]
+        assert "3 image" in conv.messages[3]["content"]
+        assert len(conv.messages[4]["content"]) == 3
+
+    async def test_oversized_filepath_rejected_before_read(self, tmp_path, monkeypatch):
+        path = tmp_path / "large.png"
+        path.write_bytes(b"x" * (5 * 1024 * 1024 + 1))
+        read_bytes = Path.read_bytes
+
+        def guarded_read(candidate):
+            if candidate == path:
+                raise AssertionError("oversized filepath was read")
+            return read_bytes(candidate)
+
+        monkeypatch.setattr(Path, "read_bytes", guarded_read)
+        conv = AgentConversation(agent_name="media", system_prompt="system", api_key="dummy",
+            tool_callables={"tool": lambda: ToolResult(content="page", images=[Image(filepath=path)])})
+
+        result = await conv._execute_tool("tool", {})
+
+        assert result.images == ()
+        assert "5 MiB" in result.text
 
     async def test_openai_media_history_is_preserved_on_next_turn(self):
         png = self._image_bytes()

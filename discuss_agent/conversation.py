@@ -9,7 +9,7 @@ from io import BytesIO
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import anthropic
 from agno.tools.function import ToolResult
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _MAX_TOOL_ITERATIONS = 20
 _MAX_TOOL_IMAGES = 3
 _MAX_TOOL_IMAGE_BYTES = 5 * 1024 * 1024
+_MAX_TOOL_IMAGE_PIXELS = 25_000_000
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ class AgentConversation:
         max_tokens: int = 4096,
         temperature: float | None = None,
         tools: list[dict] | None = None,
-        tool_callables: dict[str, callable] | None = None,
+        tool_callables: dict[str, Callable[..., Any]] | None = None,
     ):
         self.agent_name = agent_name
         self.system_prompt = system_prompt
@@ -118,18 +119,23 @@ class AgentConversation:
             raise ValueError("remote image URLs are not allowed in tool results")
         data = getattr(image, "content", None)
         if data is None and getattr(image, "filepath", None):
-            data = Path(image.filepath).read_bytes()
+            path = Path(image.filepath)
+            if path.stat().st_size > _MAX_TOOL_IMAGE_BYTES:
+                raise ValueError("tool image exceeds 5 MiB limit")
+            data = path.read_bytes()
         if not isinstance(data, bytes) or not data:
             raise ValueError("tool image has no local bytes")
         if len(data) > _MAX_TOOL_IMAGE_BYTES:
             raise ValueError("tool image exceeds 5 MiB limit")
         try:
             with PILImage.open(BytesIO(data)) as parsed:
-                parsed.load()
                 fmt = (parsed.format or "").upper()
                 if parsed.width <= 0 or parsed.height <= 0:
                     raise ValueError("tool image dimensions are invalid")
-        except (UnidentifiedImageError, OSError, ValueError) as exc:
+                if parsed.width * parsed.height > _MAX_TOOL_IMAGE_PIXELS:
+                    raise ValueError("tool image exceeds safe pixel limit")
+                parsed.load()
+        except (UnidentifiedImageError, OSError) as exc:
             raise ValueError("image must be a complete valid PNG or JPEG") from exc
         if fmt == "PNG":
             # Pillow may decode a truncated PNG without its terminal IEND chunk.
@@ -161,7 +167,9 @@ class AgentConversation:
         if fn is None:
             return _ExecutedToolResult(json.dumps({"error": f"Unknown tool: {name}"}))
         try:
-            value = await fn(**input_args) if inspect.iscoroutinefunction(fn) else fn(**input_args)
+            value = fn(**input_args)
+            if inspect.isawaitable(value):
+                value = await value
             return self._normalize_tool_result(value)
         except Exception as exc:
             logger.warning("Tool '%s' failed for agent '%s': %s", name, self.agent_name, exc)
@@ -181,13 +189,19 @@ class AgentConversation:
                 self._log_response(text, iteration)
                 return text
             results = []
+            image_count = 0
             for block in tool_uses:
                 logger.info("Agent '%s' calling tool '%s' with args: %s", self.agent_name, block.name, block.input)
                 result = await self._execute_tool(block.name, block.input)
+                if image_count + len(result.images) > _MAX_TOOL_IMAGES:
+                    result = _ExecutedToolResult(json.dumps({
+                        "error": "tool results exceed 3 image limit for one model turn"
+                    }))
+                image_count += len(result.images)
                 if result.images:
-                    content: str | list[dict[str, Any]] = [
-                        {"type": "text", "text": result.text}
-                    ]
+                    content: str | list[dict[str, Any]] = []
+                    if result.text:
+                        content.append({"type": "text", "text": result.text})
                     for image in result.images:
                         content.append({
                             "type": "image",
@@ -228,6 +242,10 @@ class AgentConversation:
                     result = await self._execute_tool(name, args)
                 except (json.JSONDecodeError, ValueError) as exc:
                     result = _ExecutedToolResult(json.dumps({"error": f"Invalid tool arguments: {exc}"}))
+                if len(pending_images) + len(result.images) > _MAX_TOOL_IMAGES:
+                    result = _ExecutedToolResult(json.dumps({
+                        "error": "tool results exceed 3 image limit for one model turn"
+                    }))
                 self.messages.append({"role": "tool", "tool_call_id": call.id, "content": result.text})
                 pending_images.extend(result.images)
             if pending_images:
