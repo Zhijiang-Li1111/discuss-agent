@@ -10,13 +10,12 @@ Add generic runtime guarantees to the discussion framework without introducing d
 
 ## Requirements
 
-### R1 — `min_rounds` is an execution gate
+### R1 — Natural convergence with a hard `max_rounds` ceiling
 
-- A host convergence judgment MUST NOT run while `round_num < min_rounds`.
-- A run MUST NOT return `converged=True` while `rounds_completed < min_rounds`, even if no open claims remain early.
-- Beginning at `min_rounds`, the existing host judgment and all-claims-closed convergence behavior applies through `max_rounds`.
+- Every response round uses the existing convergence precondition and Host judgment normally.
+- As soon as the Host closes all claims, the run returns `converged=True`; no minimum-round execution gate is introduced.
 - Reaching `max_rounds` with open claims returns `converged=False`, lists remaining disputes, and MUST NOT create or return a completion summary.
-- Regression case: a host response that could close the discussion in round 2 MUST be ignored/not requested when `min_rounds=3`; round 3 may close normally.
+- The historical `min_rounds` configuration field remains untouched for compatibility, but this feature adds no runtime behavior based on it.
 
 ### R2 — Strict generic tool loading
 
@@ -48,11 +47,10 @@ Add generic runtime guarantees to the discussion framework without introducing d
 
 ## Acceptance tests
 
-1. Round 2 is closable but `min_rounds=3`: host is not called in round 2, the run continues, and may converge in round 3.
-2. At max rounds with continuing claims: non-converged and no summary artifact call.
-3. Config default/explicit parsing for `strict_tool_loading`.
-4. Strict global/extra import, constructor, empty toolkit, and non-callable entrypoint failures fail closed with actionable errors; legacy mode skips failures.
-5. Sync and async tool calls emit complete audit records.
-6. Anthropic and OpenAI tool loops emit equivalent audit events, including failures.
-7. Engine wires logger/round context and exposes archived audit location.
-8. Full `pytest` passes.
+1. At max rounds with continuing claims: non-converged and no summary artifact call.
+2. Config default/explicit parsing for `strict_tool_loading`.
+3. Strict global/extra import, constructor, empty toolkit, and non-callable entrypoint failures fail closed with actionable errors; legacy mode skips failures.
+4. Sync and async tool calls emit complete audit records.
+5. Anthropic and OpenAI tool loops emit equivalent audit events, including failures.
+6. Engine wires logger/round context and exposes archived audit location.
+7. Full `pytest` passes.

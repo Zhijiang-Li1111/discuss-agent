@@ -51,14 +51,16 @@ def test_config_strict_tool_loading_defaults_false_and_parses_true(tmp_path):
 @patch("discuss_agent.engine.Archiver")
 @patch("discuss_agent.engine.ContextManager")
 @patch("discuss_agent.engine.AgentConversation")
-async def test_round_two_closure_waits_for_min_round_three(
+async def test_natural_convergence_ignores_legacy_min_rounds(
     MockConversation, MockContext, MockArchiver, MockAudit, _summary,
 ):
+    """Legacy min_rounds must not delay a closable second round."""
     from discuss_agent.engine import DiscussionEngine
 
-    config = _config(min_rounds=3, max_rounds=4)
+    config = _config(min_rounds=99, max_rounds=4)
+    config.host.skip_summary = True
     archiver = MagicMock()
-    archiver.start_session.return_value = "/tmp/runtime-gate-min-round"
+    archiver.start_session.return_value = "/tmp/runtime-natural-convergence"
     MockArchiver.return_value = archiver
     MockAudit.return_value = MagicMock()
     MockContext.return_value.build_initial_context = AsyncMock(return_value="generic topic")
@@ -80,22 +82,18 @@ async def test_round_two_closure_waits_for_min_round_three(
 
     MockConversation.side_effect = conversation
     engine = DiscussionEngine(config)
-    engine._host_judge = AsyncMock(side_effect=[
-        [
-            {"claim": "item-A", "verdict": "CLOSED:共识", "reason": "ok"},
-            {"claim": "item-B", "verdict": "CLOSED:共识", "reason": "ok"},
-        ]
+    engine._host_judge = AsyncMock(return_value=[
+        {"claim": "item-A", "verdict": "CLOSED:共识", "reason": "ok"},
+        {"claim": "item-B", "verdict": "CLOSED:共识", "reason": "ok"},
     ])
-    engine._host_summarize = AsyncMock(return_value="done")
 
     result = await engine.run()
 
     assert result.converged is True
-    assert result.rounds_completed == 3
-    assert result.audit_path == "/tmp/runtime-gate-min-round/audit"
-    assert counts == {"A": 3, "B": 3}
+    assert result.rounds_completed == 2
+    assert counts == {"A": 2, "B": 2}
     engine._host_judge.assert_awaited_once()
-    assert engine._host_judge.await_args.args[1] == 3
+    assert engine._host_judge.await_args.args[1] == 2
 
 
 @pytest.mark.parametrize("strict", [True, False])

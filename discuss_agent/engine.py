@@ -456,7 +456,7 @@ class DiscussionEngine:
                     claims_mgr, round_num,
                 )
 
-                if round_num >= self._config.min_rounds and precondition_met:
+                if precondition_met:
                     # Ask host to judge
                     verdicts = await self._host_judge(claims_mgr, round_num)
                     for v in verdicts:
@@ -469,10 +469,7 @@ class DiscussionEngine:
                     self._archiver.save_round(round_num, "host", {"verdicts": verdicts})
 
                 # Check if all claims are closed
-                if (
-                    round_num >= self._config.min_rounds
-                    and not claims_mgr.get_open_claims()
-                ):
+                if not claims_mgr.get_open_claims():
                     logger.info("All claims closed. Generating summary.")
                     if self._config.host.skip_summary:
                         summary = None
