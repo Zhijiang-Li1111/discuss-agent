@@ -218,6 +218,7 @@ class DiscussionConfig:
     context_builder: str | None = None
     limitation: str | None = None
     skills: list[SkillConfig] | None = None
+    strict_tool_loading: bool = False
 
 
 _REQUIRED_TOP_KEYS = ("agents", "host", "tools")
@@ -251,6 +252,7 @@ class ConfigLoader:
 
         min_rounds: int = disc.get("min_rounds", 2)
         max_rounds: int = disc.get("max_rounds", 5)
+        strict_tool_loading = bool(disc.get("strict_tool_loading", False))
 
         if min_rounds > max_rounds:
             raise ValueError(
@@ -342,4 +344,5 @@ class ConfigLoader:
             context_builder=context_builder,
             limitation=limitation,
             skills=skills if skills else None,
+            strict_tool_loading=strict_tool_loading,
         )

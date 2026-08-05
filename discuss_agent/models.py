@@ -29,3 +29,10 @@ class DiscussionResult:
     summary: str | None
     remaining_disputes: list[str]
     terminated_by_error: bool = False
+
+    @property
+    def audit_path(self) -> str:
+        """Location of the archived JSONL audit records for this run."""
+        from pathlib import Path
+
+        return str(Path(self.archive_path) / "audit")

@@ -95,13 +95,18 @@ class AuditLogger:
         system_prompt_size_chars: int | None = None,
         system_prompt_size_tokens_est: int | None = None,
         skill_tools_loaded: list[str] | None = None,
+        round_num: int | None = None,
+        call_type: str = "agent",
     ) -> None:
         event: dict = {
             "ts": _now_iso(),
             "agent": agent_name,
             "event": "call_start",
             "prompt_preview": _truncate(prompt),
+            "call_type": call_type,
         }
+        if round_num is not None:
+            event["round"] = round_num
         if system_prompt_size_chars is not None:
             event["system_prompt_size_chars"] = system_prompt_size_chars
         if system_prompt_size_tokens_est is not None:
@@ -118,6 +123,7 @@ class AuditLogger:
         response_size: int | None = None,
         duration_ms: float | None = None,
         error: str | None = None,
+        round_num: int | None = None,
     ) -> None:
         event: dict = {
             "ts": _now_iso(),
@@ -126,6 +132,8 @@ class AuditLogger:
             "tool": tool_name,
             "args": _summarize_args(args),
         }
+        if round_num is not None:
+            event["round"] = round_num
         if response_size is not None:
             event["response_size"] = response_size
         if duration_ms is not None:
@@ -166,13 +174,18 @@ class AuditLogger:
         *,
         messages_count: int | None = None,
         total_tool_response_chars: int | None = None,
+        round_num: int | None = None,
+        call_type: str = "agent",
     ) -> None:
         event: dict = {
             "ts": _now_iso(),
             "agent": agent_name,
             "event": "call_end",
             "duration_ms": round(duration_ms, 1),
+            "call_type": call_type,
         }
+        if round_num is not None:
+            event["round"] = round_num
         if output_preview is not None:
             event["output_preview"] = _truncate(output_preview)
         if stop_reason is not None:
@@ -188,6 +201,7 @@ class AuditLogger:
         agent_name: str,
         error: str,
         duration_ms: float | None = None,
+        round_num: int | None = None,
     ) -> None:
         event: dict = {
             "ts": _now_iso(),
@@ -195,6 +209,8 @@ class AuditLogger:
             "event": "error",
             "error": error,
         }
+        if round_num is not None:
+            event["round"] = round_num
         if duration_ms is not None:
             event["duration_ms"] = round(duration_ms, 1)
         self._write(agent_name, event)

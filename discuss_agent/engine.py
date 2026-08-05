@@ -68,30 +68,55 @@ class DiscussionEngine:
 
         for tc in self._config.tools:
             try:
-                cls = import_from_path(tc.path)
-                toolkit = cls()  # instantiate the Toolkit
-                # Collect sync functions
-                for name, func in toolkit.functions.items():
-                    tool_defs.append({
-                        "name": name,
-                        "description": func.description or "",
-                        "input_schema": func.parameters or {"type": "object", "properties": {}},
-                    })
-                    tool_callables[name] = func.entrypoint
-                # Collect async functions
-                for name, func in toolkit.async_functions.items():
-                    if name not in tool_callables:
-                        tool_defs.append({
-                            "name": name,
-                            "description": func.description or "",
-                            "input_schema": func.parameters or {"type": "object", "properties": {}},
-                        })
-                    # Prefer async over sync
-                    tool_callables[name] = func.entrypoint
-            except Exception:
+                defs, callables = self._load_toolkit(
+                    tc.path, "global tool", strict=self._config.strict_tool_loading,
+                )
+                self._merge_tools(tool_defs, tool_callables, defs, callables)
+            except Exception as exc:
+                if self._config.strict_tool_loading:
+                    raise RuntimeError(
+                        f"Strict tool loading failed for global tool '{tc.path}': {exc}"
+                    ) from exc
                 logger.warning("Failed to load tool %s", tc.path, exc_info=True)
 
         return tool_defs, tool_callables
+
+    @staticmethod
+    def _load_toolkit(
+        path: str, scope: str, *, strict: bool = False,
+    ) -> tuple[list[dict], dict[str, callable]]:
+        """Import one configured toolkit and normalize its callable functions."""
+        cls = import_from_path(path)
+        toolkit = cls()
+        functions = getattr(toolkit, "functions", {}) or {}
+        async_functions = getattr(toolkit, "async_functions", {}) or {}
+        defs: list[dict] = []
+        callables: dict[str, callable] = {}
+        for collection in (functions, async_functions):
+            for name, func in collection.items():
+                entrypoint = getattr(func, "entrypoint", None)
+                if strict and not callable(entrypoint):
+                    raise TypeError(f"{scope} '{path}' function '{name}' has no callable entrypoint")
+                if name not in callables:
+                    defs.append({
+                        "name": name,
+                        "description": getattr(func, "description", None) or "",
+                        "input_schema": getattr(func, "parameters", None)
+                        or {"type": "object", "properties": {}},
+                    })
+                callables[name] = entrypoint
+        if strict and not callables:
+            raise ValueError(f"{scope} '{path}' exposes no callable functions")
+        return defs, callables
+
+    @staticmethod
+    def _merge_tools(
+        target_defs: list[dict], target_callables: dict[str, callable],
+        new_defs: list[dict], new_callables: dict[str, callable],
+    ) -> None:
+        known = {item["name"] for item in target_defs}
+        target_defs.extend(item for item in new_defs if item["name"] not in known)
+        target_callables.update(new_callables)
 
     def _resolve_agent_tools(
         self, ac, global_defs: list[dict], global_callables: dict[str, callable],
@@ -103,24 +128,16 @@ class DiscussionEngine:
         # Add extra tools
         for tc in ac.extra_tools:
             try:
-                cls = import_from_path(tc.path)
-                toolkit = cls()
-                for name, func in toolkit.functions.items():
-                    defs.append({
-                        "name": name,
-                        "description": func.description or "",
-                        "input_schema": func.parameters or {"type": "object", "properties": {}},
-                    })
-                    callables[name] = func.entrypoint
-                for name, func in toolkit.async_functions.items():
-                    if name not in callables or name not in [d["name"] for d in defs]:
-                        defs.append({
-                            "name": name,
-                            "description": func.description or "",
-                            "input_schema": func.parameters or {"type": "object", "properties": {}},
-                        })
-                    callables[name] = func.entrypoint
-            except Exception:
+                extra_defs, extra_callables = self._load_toolkit(
+                    tc.path, "extra tool", strict=self._config.strict_tool_loading,
+                )
+                self._merge_tools(defs, callables, extra_defs, extra_callables)
+            except Exception as exc:
+                if self._config.strict_tool_loading:
+                    raise RuntimeError(
+                        f"Strict tool loading failed for agent '{ac.name}' extra tool "
+                        f"'{tc.path}': {exc}"
+                    ) from exc
                 logger.warning("Failed to load extra tool %s", tc.path, exc_info=True)
 
         # Remove disabled tools
@@ -166,11 +183,14 @@ class DiscussionEngine:
                 temperature=self._config.model_config.temperature,
                 tools=agent_defs if agent_defs else None,
                 tool_callables=agent_callables if agent_callables else None,
+                audit_logger=self._audit,
             )
 
     async def _call_agent(self, agent_name: str, prompt: str) -> str | None:
         """Send a message to an agent, with retry on failure."""
         conv = self._conversations[agent_name]
+        # _round_1/_round_n set this before dispatch; keep compatibility with
+        # conversation doubles that do not implement round context.
         logger.info("  -> Calling agent '%s' (prompt %d chars)...", agent_name, len(prompt))
         t0 = _time.monotonic()
         for attempt in range(2):
@@ -205,6 +225,9 @@ class DiscussionEngine:
             limitation=self._config.limitation,
             context=context,
         )
+        for conv in self._conversations.values():
+            if hasattr(conv, "set_round"):
+                conv.set_round(1)
 
         async def call_one(name: str) -> AgentOutput | None:
             text = await self._call_agent(name, prompt)
@@ -226,6 +249,9 @@ class DiscussionEngine:
         """Round N: push incremental update and collect responses."""
         logger.info("=== Round %d: Incremental update ===", round_num)
         prompt = claims_mgr.generate_update_prompt(prev_round)
+        for conv in self._conversations.values():
+            if hasattr(conv, "set_round"):
+                conv.set_round(round_num)
 
         async def call_one(name: str) -> AgentOutput | None:
             text = await self._call_agent(name, prompt)
@@ -278,36 +304,62 @@ class DiscussionEngine:
             return openai.AsyncOpenAI(**client_kwargs)
         return anthropic.AsyncAnthropic(**client_kwargs)
 
-    async def _call_host(self, system_prompt: str, prompt: str) -> str:
+    async def _call_host(
+        self, system_prompt: str, prompt: str, *, round_num: int | None = None,
+    ) -> str:
         """Run one host request and extract text from either protocol."""
+        started = _time.monotonic()
+        if self._audit:
+            self._audit.log_call_start(
+                "host", prompt, round_num=round_num, call_type="host"
+            )
         provider = infer_provider(self._host_model_config.model)
         client = self._create_host_client()
-        if provider == "openai":
-            kwargs: dict = {
-                "model": self._host_model_config.model,
-                "max_tokens": self._host_model_config.max_tokens or 4096,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-            }
-            if self._host_model_config.temperature is not None:
-                kwargs["temperature"] = self._host_model_config.temperature
-            response = await client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content or ""
-
-        kwargs = {
-            "model": self._host_model_config.model,
-            "max_tokens": self._host_model_config.max_tokens or 4096,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if self._host_model_config.temperature is not None:
-            kwargs["temperature"] = self._host_model_config.temperature
-        response = await client.messages.create(**kwargs)
-        return "".join(
-            block.text for block in response.content if block.type == "text"
-        )
+        try:
+            if provider == "openai":
+                kwargs: dict = {
+                    "model": self._host_model_config.model,
+                    "max_tokens": self._host_model_config.max_tokens or 4096,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                }
+                if self._host_model_config.temperature is not None:
+                    kwargs["temperature"] = self._host_model_config.temperature
+                response = await client.chat.completions.create(**kwargs)
+                result = response.choices[0].message.content or ""
+            else:
+                kwargs = {
+                    "model": self._host_model_config.model,
+                    "max_tokens": self._host_model_config.max_tokens or 4096,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if self._host_model_config.temperature is not None:
+                    kwargs["temperature"] = self._host_model_config.temperature
+                response = await client.messages.create(**kwargs)
+                result = "".join(
+                    block.text for block in response.content if block.type == "text"
+                )
+        except Exception as exc:
+            if self._audit:
+                self._audit.log_error(
+                    "host", str(exc), (_time.monotonic() - started) * 1000,
+                    round_num=round_num,
+                )
+                self._audit.log_call_end(
+                    "host", (_time.monotonic() - started) * 1000,
+                    stop_reason="error", round_num=round_num,
+                    call_type="host",
+                )
+            raise
+        if self._audit:
+            self._audit.log_call_end(
+                "host", (_time.monotonic() - started) * 1000, result,
+                round_num=round_num, call_type="host",
+            )
+        return result
 
     async def _host_judge(self, claims_mgr: ClaimsManager, round_num: int) -> list[dict]:
         """Host LLM judges each OPEN claim."""
@@ -328,7 +380,8 @@ class DiscussionEngine:
         for attempt in range(2):
             try:
                 text = await self._call_host(
-                    self._config.host.convergence_prompt, prompt
+                    self._config.host.convergence_prompt, prompt,
+                    round_num=round_num,
                 )
                 match = re.search(r"\[.*\]", text, re.DOTALL)
                 if match:
@@ -338,37 +391,41 @@ class DiscussionEngine:
                     continue
         return []
 
-    async def _host_summarize(self, claims_mgr: ClaimsManager) -> str:
+    async def _host_summarize(
+        self, claims_mgr: ClaimsManager, round_num: int | None = None,
+    ) -> str:
         """Host generates final summary using its configured protocol."""
         logger.info("=== HOST SUMMARIZE ===")
         prompt = (
             f"以下是完整的讨论记录：\n\n{claims_mgr.format_file()}\n\n"
             f"讨论已经结束。请基于各方达成的共识和记录的分歧输出总结。"
         )
-        return await self._call_host(self._config.host.summary_prompt, prompt)
+        return await self._call_host(
+            self._config.host.summary_prompt, prompt, round_num=round_num,
+        )
 
     async def run(self) -> DiscussionResult:
         """Run the full shared-file discussion loop."""
         session_path = self._archiver.start_session(self._config)
         self._audit = AuditLogger(session_path)
 
-        # Build initial context
-        context = await self._context_mgr.build_initial_context()
-        self._archiver.save_context(context)
-
-        # Setup claims.md
-        claims_file = os.path.join(session_path, "claims.md")
-        claims_mgr = ClaimsManager(claims_file)
-        # Extract topic from context (first non-empty line or config)
-        topic = context.strip().split("\n")[0] if context.strip() else "讨论议题"
-        claims_mgr.topic = topic
-
-        # Create agent conversations
-        self._create_conversations()
-
         max_rounds = self._config.max_rounds
 
         try:
+            # Strict tool validation/initialization happens before context or
+            # any agent model call. Permissive mode preserves warning-and-skip.
+            self._create_conversations()
+
+            # Build initial context
+            context = await self._context_mgr.build_initial_context()
+            self._archiver.save_context(context)
+
+            # Setup claims.md
+            claims_file = os.path.join(session_path, "claims.md")
+            claims_mgr = ClaimsManager(claims_file)
+            # Extract topic from context (first non-empty line or config)
+            topic = context.strip().split("\n")[0] if context.strip() else "讨论议题"
+            claims_mgr.topic = topic
             # Round 1: agents propose initial claims
             outputs = await self._round_1(claims_mgr, topic, context)
             claims_mgr.merge_round(outputs)
@@ -399,7 +456,7 @@ class DiscussionEngine:
                     claims_mgr, round_num,
                 )
 
-                if precondition_met:
+                if round_num >= self._config.min_rounds and precondition_met:
                     # Ask host to judge
                     verdicts = await self._host_judge(claims_mgr, round_num)
                     for v in verdicts:
@@ -412,12 +469,17 @@ class DiscussionEngine:
                     self._archiver.save_round(round_num, "host", {"verdicts": verdicts})
 
                 # Check if all claims are closed
-                if not claims_mgr.get_open_claims():
+                if (
+                    round_num >= self._config.min_rounds
+                    and not claims_mgr.get_open_claims()
+                ):
                     logger.info("All claims closed. Generating summary.")
                     if self._config.host.skip_summary:
                         summary = None
                     else:
-                        summary = await self._host_summarize(claims_mgr)
+                        summary = await self._host_summarize(
+                            claims_mgr, round_num=round_num,
+                        )
                         self._archiver.save_summary(summary)
                     return DiscussionResult(
                         converged=True,

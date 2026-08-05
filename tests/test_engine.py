@@ -151,6 +151,7 @@ class TestDiscussionEngineIntegration:
         from discuss_agent.engine import DiscussionEngine
 
         config = _make_config(num_agents=2, max_rounds=2)
+        config.host.skip_summary = False
 
         archiver_inst = MagicMock()
         archiver_inst.start_session.return_value = "/tmp/test_session2"
@@ -198,6 +199,8 @@ class TestDiscussionEngineIntegration:
         assert result.converged is False
         assert result.rounds_completed == 2
         assert len(result.remaining_disputes) > 0
+        assert result.summary is None
+        archiver_inst.save_summary.assert_not_called()
 
 
 class TestOpenAIHostRouting:

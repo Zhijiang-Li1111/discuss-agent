@@ -9,6 +9,7 @@ from io import BytesIO
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any, Callable
 
 import anthropic
@@ -17,6 +18,7 @@ import openai
 from PIL import Image as PILImage, UnidentifiedImageError
 
 from discuss_agent.config import infer_provider, normalize_base_url
+from discuss_agent.audit import AuditLogger
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ class AgentConversation:
         temperature: float | None = None,
         tools: list[dict] | None = None,
         tool_callables: dict[str, Callable[..., Any]] | None = None,
+        audit_logger: AuditLogger | None = None,
     ):
         self.agent_name = agent_name
         self.system_prompt = system_prompt
@@ -62,6 +65,8 @@ class AgentConversation:
         self.tools = tools or []
         self._tool_callables = tool_callables or {}
         self.messages: list[dict[str, Any]] = []
+        self._audit = audit_logger
+        self._round_num: int | None = None
 
         client_kwargs: dict[str, Any] = {"timeout": 600.0}
         if api_key:
@@ -73,6 +78,10 @@ class AgentConversation:
             self._client = openai.AsyncOpenAI(**client_kwargs)
         else:
             self._client = anthropic.AsyncAnthropic(**client_kwargs)
+
+    def set_round(self, round_num: int) -> None:
+        """Associate subsequent lifecycle/tool events with a discussion round."""
+        self._round_num = round_num
 
     def _build_anthropic_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -164,21 +173,70 @@ class AgentConversation:
         return _ExecutedToolResult(json.dumps(value, ensure_ascii=False, default=str))
 
     async def _execute_tool(self, name: str, input_args: dict) -> _ExecutedToolResult:
+        started = time.monotonic()
         fn = self._tool_callables.get(name)
         if fn is None:
-            return _ExecutedToolResult(json.dumps({"error": f"Unknown tool: {name}"}))
+            error = f"Unknown tool: {name}"
+            result = _ExecutedToolResult(json.dumps({"error": error}))
+            self._log_tool(name, input_args, result, started, error)
+            return result
         try:
             value = fn(**input_args)
             if inspect.isawaitable(value):
                 value = await value
-            return self._normalize_tool_result(value)
+            result = self._normalize_tool_result(value)
+            self._log_tool(name, input_args, result, started)
+            return result
         except Exception as exc:
             logger.warning("Tool '%s' failed for agent '%s': %s", name, self.agent_name, exc)
-            return _ExecutedToolResult(json.dumps({"error": str(exc)}))
+            result = _ExecutedToolResult(json.dumps({"error": str(exc)}))
+            self._log_tool(name, input_args, result, started, str(exc))
+            return result
+
+    def _log_tool(
+        self, name: str, args: dict, result: _ExecutedToolResult,
+        started: float, error: str | None = None,
+    ) -> None:
+        if self._audit:
+            self._audit.log_tool_call(
+                self.agent_name, name, args,
+                response_size=len(result.text) + sum(len(image.data) for image in result.images),
+                duration_ms=(time.monotonic() - started) * 1000,
+                error=error,
+                round_num=self._round_num,
+            )
 
     async def send(self, user_message: str) -> str:
+        started = time.monotonic()
+        if self._audit:
+            self._audit.log_call_start(
+                self.agent_name, user_message, round_num=self._round_num,
+                system_prompt_size_chars=len(self.system_prompt),
+                system_prompt_size_tokens_est=len(self.system_prompt) // 4,
+                skill_tools_loaded=[tool.get("name", "") for tool in self.tools],
+            )
         self.messages.append({"role": "user", "content": user_message})
-        return await self._send_openai() if self.provider == "openai" else await self._send_anthropic()
+        try:
+            result = await self._send_openai() if self.provider == "openai" else await self._send_anthropic()
+        except Exception as exc:
+            if self._audit:
+                self._audit.log_error(
+                    self.agent_name, str(exc),
+                    duration_ms=(time.monotonic() - started) * 1000,
+                    round_num=self._round_num,
+                )
+                self._audit.log_call_end(
+                    self.agent_name, (time.monotonic() - started) * 1000,
+                    stop_reason="error", messages_count=len(self.messages),
+                    round_num=self._round_num,
+                )
+            raise
+        if self._audit:
+            self._audit.log_call_end(
+                self.agent_name, (time.monotonic() - started) * 1000,
+                result, messages_count=len(self.messages), round_num=self._round_num,
+            )
+        return result
 
     async def _send_anthropic(self) -> str:
         for iteration in range(_MAX_TOOL_ITERATIONS):
@@ -242,7 +300,15 @@ class AgentConversation:
                         raise ValueError("tool arguments must be a JSON object")
                     result = await self._execute_tool(name, args)
                 except (json.JSONDecodeError, ValueError) as exc:
-                    result = _ExecutedToolResult(json.dumps({"error": f"Invalid tool arguments: {exc}"}))
+                    error = f"Invalid tool arguments: {exc}"
+                    result = _ExecutedToolResult(json.dumps({"error": error}))
+                    # Argument parsing failed before the common executor.
+                    if self._audit:
+                        self._audit.log_tool_call(
+                            self.agent_name, name, {"raw": call.function.arguments},
+                            response_size=len(result.text), duration_ms=0.0,
+                            error=error, round_num=self._round_num,
+                        )
                 if len(pending_images) + len(result.images) > _MAX_TOOL_IMAGES:
                     result = _ExecutedToolResult(json.dumps({
                         "error": "tool results exceed 3 image limit for one model turn"
