@@ -181,7 +181,7 @@ python3 -m discuss_agent config.yaml --resume discussions/2026-04-11_2159 --roun
 | `discussion` | `temperature` | No | SDK default | Sampling temperature |
 | `discussion` | `max_tokens` | No | SDK default | Maximum output tokens |
 | `discussion` | `min_rounds` | No | 2 | Legacy compatibility field; does not gate convergence |
-| `discussion` | `max_rounds` | No | 6 | Safety cap on rounds, not a convergence requirement |
+| `discussion` | `max_rounds` | No | 5 | Safety cap on rounds, not a convergence requirement |
 | `tools` | `path` | Yes | — | Python dotted path to a Toolkit subclass |
 | `context_builder` | — | No | — | Python dotted path to an async context builder function |
 | `limitation` | — | No | — | Restrict discussion scope; injected as a warning prefix in every round |

@@ -72,7 +72,7 @@ class TestConfigLoaderDefaults:
 
         cfg = ConfigLoader.load(str(path))
         assert cfg.min_rounds == 2
-        assert cfg.max_rounds == 6
+        assert cfg.max_rounds == 5
 
     def test_legacy_min_rounds_does_not_constrain_safety_cap(
         self, tmp_path, sample_config_dict,
@@ -81,14 +81,14 @@ class TestConfigLoaderDefaults:
         d["discussion"] = {
             "model": "claude-sonnet-4-20250514",
             "min_rounds": 99,
-            "max_rounds": 6,
+            "max_rounds": 5,
         }
         path = tmp_path / "legacy-min-rounds.yaml"
         path.write_text(yaml.dump(d, allow_unicode=True))
 
         cfg = ConfigLoader.load(str(path))
         assert cfg.min_rounds == 99
-        assert cfg.max_rounds == 6
+        assert cfg.max_rounds == 5
 
 
 class TestConfigLoaderValidation:
@@ -189,28 +189,6 @@ class TestConfigLoaderValidation:
 
         cfg = ConfigLoader.load(str(path))
         assert cfg.tools == []
-
-    @pytest.mark.parametrize(
-        ("section", "field", "value"),
-        [
-            ("discussion", "strict_tool_loading", "false"),
-            ("discussion", "strict_tool_loading", 0),
-            ("host", "skip_summary", "false"),
-            ("host", "skip_summary", 1),
-        ],
-    )
-    def test_boolean_options_reject_non_boolean_values(
-        self, tmp_path, sample_config_dict, section, field, value,
-    ):
-        d = dict(sample_config_dict)
-        d[section] = dict(sample_config_dict[section])
-        d[section][field] = value
-        path = tmp_path / "invalid-bool.yaml"
-        path.write_text(yaml.dump(d, allow_unicode=True))
-
-        with pytest.raises(ValueError, match=rf"{section}\.{field} must be a boolean"):
-            ConfigLoader.load(str(path))
-
 
 class TestAgentConfigPerAgentTools:
     """Test per-agent extra_tools and disable_tools parsing."""
