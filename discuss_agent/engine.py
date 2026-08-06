@@ -401,29 +401,52 @@ class DiscussionEngine:
                 f"{claims_text}\n\n"
                 "## 跨批次全局摘要\n\n"
                 f"{global_context}\n\n"
+                "全局摘要中的截断 marker 是完整性提示，不自动否决所有 claim；"
+                "仅当当前 claim 依赖缺失的全局上下文，且缺失内容可能改变 verdict 时，"
+                "才必须选择 CONTINUE 并说明依赖。\n"
                 "请逐项基于目标、claims、证据、反驳和 UNKNOWN 做语义裁决。"
                 "不得以固定轮数、回应数量或全员回应作为准出门槛，也不得把无人反驳当作共识。\n"
                 f"第{round_num}轮也必须遵守以下证据和失败标准，不得因轮次提前关闭。\n"
                 "逐项判断：核心要求是否被实质满足；关键反驳是否得到处理；"
                 "UNKNOWN是否会改变结论还是只降低置信度；证据冲突是否被忠实保留；"
                 "继续讨论是否可能获得会改变判断的新信息。\n"
-                "- CLOSED:共识：证据标准已满足，关键反例已处理，结论边界清楚。\n"
-                "- CLOSED:分歧：关键证据和反驳已充分呈现，但立场仍不同；明确记录分歧。\n"
+                "- CLOSED:共识：共识不是投票；证据标准已满足、关键反例已处理、"
+                "结论边界清楚，且不存在会实质改变结论的 UNKNOWN。\n"
+                "- CLOSED:分歧：关键证据和反驳已充分呈现，但立场仍不同；"
+                "仅剩价值判断、先验或模型选择时，明确记录分歧。\n"
                 "- CONTINUE：证据不足、关键角色未审阅、反例未处理或边界不清；"
                 "说明非空缺口，定向给相关 Agent（至少一个），"
                 "并明确是否允许带 UNKNOWN 推进。"
                 "这些是语义路由提示，不是代码计数门槛。\n"
+                "若分歧仍可由可获得的事实或计算消解，选择 CONTINUE；"
+                "只有无法再由事实或计算消解、仅剩价值判断、先验或模型选择时，"
+                "才选择 CLOSED:分歧。\n"
                 "UNKNOWN 会改变结论或是实质缺口时，必须 CONTINUE；"
                 "只有不影响结论边界时才可降低置信度后关闭。\n"
+                "allow_unknown_progress 仅适用于 CONTINUE，表示允许在明确保留 UNKNOWN "
+                "的前提下继续补证；不得把 UNKNOWN 变成事实，也不得用于 CLOSED。\n"
+                "room-level gate 优先于逐 claim 关闭；任何 room-level gate 未满足时，"
+                "讨论不得进入完成态，相关 claim 必须 CONTINUE。\n"
                 "失败条件：证据无法追溯、关键反驳被忽略、UNKNOWN 被伪装成事实、"
                 "或上下文截断导致无法判断时，必须 CONTINUE，不得假收敛。\n"
                 f"{final_instruction}"
                 f"可定向的 Agent：{bounded_agent_names}\n"
-                "本批每个 claim 必须且只能输出一次。输出 JSON 数组，不要输出其他文字：\n"
-                '[{"claim":"关键词","verdict":"CLOSED:共识|CLOSED:分歧|CONTINUE",'
-                '"reason":"基于证据的理由","missing":"CONTINUE时缺什么，否则空字符串",'
-                '"needs_agents":["CONTINUE时至少一个需要回应的Agent名称"],'
-                '"allow_unknown_progress":false}]'
+                "本批每个 claim 必须且只能输出一次。输出 JSON 数组，不要输出其他文字；"
+                "对象不得缺字段或增加未知字段。\n"
+                "CLOSED JSON对象严格字段："
+                '{"claim":"关键词","verdict":"CLOSED:共识|CLOSED:分歧",'
+                '"reason":"基于证据的非空理由","missing":"","needs_agents":[],'
+                '"evidence_status":"SUPPORTED",'
+                '"counterevidence_status":"RESOLVED|NONE_IDENTIFIED",'
+                '"unknowns_resolved":true,'
+                '"evidence_refs":[{"entry_type":"FROM","agent_name":"Agent名称",'
+                '"round_num":1,"source":"对应entry正文中逐字出现的'
+                'https/file/source URI、DOI或URN"}],'
+                '"reviewed_by":["实际留下审阅entry且不同于原提议者的Agent名称"]}\n'
+                "CONTINUE JSON对象严格字段："
+                '{"claim":"关键词","verdict":"CONTINUE","reason":"非空理由",'
+                '"missing":"非空缺口","needs_agents":["至少一个有效Agent名称"],'
+                '"allow_unknown_progress":false}'
             )
             for attempt in range(2):
                 try:
@@ -433,50 +456,134 @@ class DiscussionEngine:
                         round_num=round_num,
                     )
                     match = re.search(r"\[.*\]", text, re.DOTALL)
-                    if match:
+                    if not match:
+                        self._record_host_attempt_rejection(
+                            attempt + 1,
+                            "missing JSON array",
+                        )
+                        continue
+                    try:
                         parsed = json.loads(match.group())
-                        if isinstance(parsed, list):
-                            returned_claims = [
-                                item.get("claim")
-                                for item in parsed
-                                if isinstance(item, dict)
-                                and isinstance(item.get("claim"), str)
-                            ]
-                            if (
-                                len(returned_claims) == len(parsed)
-                                and len(returned_claims) == len(expected_keywords)
-                                and set(returned_claims) == expected_keywords
-                            ):
-                                for item in parsed:
-                                    reference = item["claim"]
-                                    if reference in truncated_references:
-                                        item.update({
-                                            "verdict": "CONTINUE",
-                                            "reason": (
-                                                "上下文截断，无法安全关闭 claim"
-                                            ),
-                                            "missing": (
-                                                "完整的 claim 证据、反驳和身份上下文"
-                                            ),
-                                            "needs_agents": agent_names,
-                                            "allow_unknown_progress": False,
-                                        })
-                                    item["claim"] = reference_to_keyword.get(
-                                        reference,
-                                        reference,
-                                    )
-                                verdicts.extend(parsed)
-                                break
-                            self._record_host_protocol_rejections(
-                                parsed, expected_keywords,
+                    except json.JSONDecodeError:
+                        self._record_host_attempt_rejection(
+                            attempt + 1,
+                            "invalid JSON array",
+                        )
+                        continue
+                    if not isinstance(parsed, list):
+                        self._record_host_attempt_rejection(
+                            attempt + 1,
+                            "JSON payload is not an array",
+                        )
+                        continue
+                    returned_claims = [
+                        item.get("claim")
+                        for item in parsed
+                        if isinstance(item, dict)
+                        and isinstance(item.get("claim"), str)
+                    ]
+                    if (
+                        len(returned_claims) == len(parsed)
+                        and len(returned_claims) == len(expected_keywords)
+                        and set(returned_claims) == expected_keywords
+                    ):
+                        for item in parsed:
+                            reference = item["claim"]
+                            if reference in truncated_references:
+                                item.clear()
+                                item.update({
+                                    "claim": reference,
+                                    "verdict": "CONTINUE",
+                                    "reason": (
+                                        "上下文截断，无法安全关闭 claim"
+                                    ),
+                                    "missing": (
+                                        "完整的 claim 证据、反驳和身份上下文"
+                                    ),
+                                    "needs_agents": agent_names,
+                                    "allow_unknown_progress": False,
+                                })
+                            item["claim"] = reference_to_keyword.get(
+                                reference,
+                                reference,
                             )
-                except Exception:
+                        schema_rejections: list[dict] = []
+                        for item in parsed:
+                            decision = item.get("verdict")
+                            schema_reason = ""
+                            if (
+                                decision in {"CLOSED:共识", "CLOSED:分歧"}
+                                and not self._closed_schema_is_valid(item)
+                            ):
+                                schema_reason = "invalid closed verdict schema"
+                            elif (
+                                decision == "CONTINUE"
+                                and not self._continue_schema_is_valid(item)
+                            ):
+                                schema_reason = "invalid continue verdict schema"
+                            elif (
+                                decision == "CONTINUE"
+                                and any(
+                                    name not in agent_names
+                                    for name in item["needs_agents"]
+                                )
+                            ):
+                                schema_reason = (
+                                    "invalid continue verdict routing"
+                                )
+                            elif decision not in {
+                                "CLOSED:共识",
+                                "CLOSED:分歧",
+                                "CONTINUE",
+                            }:
+                                schema_reason = "invalid verdict"
+                            if schema_reason:
+                                schema_rejections.append({
+                                    **item,
+                                    "host_reason": item.get("reason", ""),
+                                    "reason": schema_reason,
+                                    "attempt": attempt + 1,
+                                })
+                        if schema_rejections:
+                            self._host_protocol_rejections.extend(
+                                schema_rejections,
+                            )
+                            continue
+                        verdicts.extend(parsed)
+                        break
+                    self._record_host_protocol_rejections(
+                        parsed,
+                        expected_keywords,
+                        attempt=attempt + 1,
+                    )
+                except Exception as exc:
+                    self._record_host_attempt_rejection(
+                        attempt + 1,
+                        f"Host call failed: {type(exc).__name__}",
+                    )
                     if attempt == 0:
                         continue
         return verdicts
 
+    def _record_host_attempt_rejection(
+        self,
+        attempt: int,
+        reason: str,
+    ) -> None:
+        self._host_protocol_rejections.append({
+            "claim": None,
+            "verdict": None,
+            "host_reason": "",
+            "reason": reason,
+            "attempt": attempt,
+        })
+
     def _record_host_protocol_rejections(
-        self, verdicts: list, expected_keywords: set[str],
+        self,
+        verdicts: list,
+        expected_keywords: set[str],
+        *,
+        attempt: int,
     ) -> None:
         """Audit missing, extra, and duplicate IDs from a rejected Host batch."""
         seen: set[str] = set()
@@ -490,12 +597,14 @@ class DiscussionEngine:
                     **item,
                     "host_reason": item.get("reason", ""),
                     "reason": "duplicate verdict",
+                    "attempt": attempt,
                 })
             elif keyword not in expected_keywords:
                 self._host_protocol_rejections.append({
                     **item,
                     "host_reason": item.get("reason", ""),
                     "reason": "claim was not offered to the host",
+                    "attempt": attempt,
                 })
             seen.add(keyword)
             returned.add(keyword)
@@ -505,6 +614,7 @@ class DiscussionEngine:
                 "verdict": None,
                 "host_reason": "",
                 "reason": "missing verdict",
+                "attempt": attempt,
             })
 
     def _apply_host_verdicts(
@@ -543,6 +653,14 @@ class DiscussionEngine:
                 rejection_reason = "invalid verdict"
             elif not isinstance(reason, str) or not reason.strip():
                 rejection_reason = "reason must be a non-empty string"
+            elif decision != "CONTINUE" and not self._closed_schema_is_valid(
+                verdict,
+            ):
+                rejection_reason = "invalid closed verdict schema"
+            elif decision == "CONTINUE" and not self._continue_schema_is_valid(
+                verdict,
+            ):
+                rejection_reason = "invalid continue verdict schema"
             elif decision != "CONTINUE" and (
                 not isinstance(verdict.get("missing", ""), str)
                 or not isinstance(verdict.get("needs_agents", []), list)
@@ -624,6 +742,86 @@ class DiscussionEngine:
         if accepted or missing_keywords:
             claims_mgr.save()
         return accepted, rejected
+
+    @staticmethod
+    def _closed_schema_is_valid(verdict: dict) -> bool:
+        required = {
+            "claim",
+            "verdict",
+            "reason",
+            "missing",
+            "needs_agents",
+            "evidence_status",
+            "counterevidence_status",
+            "unknowns_resolved",
+            "evidence_refs",
+            "reviewed_by",
+        }
+        if set(verdict) != required:
+            return False
+        if (
+            type(verdict["claim"]) is not str
+            or type(verdict["verdict"]) is not str
+            or type(verdict["reason"]) is not str
+            or not verdict["reason"].strip()
+            or type(verdict["missing"]) is not str
+            or verdict["missing"] != ""
+            or type(verdict["needs_agents"]) is not list
+            or verdict["needs_agents"]
+            or type(verdict["evidence_status"]) is not str
+            or verdict["evidence_status"] != "SUPPORTED"
+            or type(verdict["counterevidence_status"]) is not str
+            or verdict["counterevidence_status"] not in {
+                "RESOLVED",
+                "NONE_IDENTIFIED",
+            }
+            or type(verdict["unknowns_resolved"]) is not bool
+            or verdict["unknowns_resolved"] is not True
+            or type(verdict["evidence_refs"]) is not list
+            or type(verdict["reviewed_by"]) is not list
+        ):
+            return False
+        for reference in verdict["evidence_refs"]:
+            if (
+                type(reference) is not dict
+                or set(reference) != {
+                    "entry_type",
+                    "agent_name",
+                    "round_num",
+                    "source",
+                }
+                or type(reference["entry_type"]) is not str
+                or reference["entry_type"] != "FROM"
+                or type(reference["agent_name"]) is not str
+                or type(reference["round_num"]) is not int
+                or type(reference["source"]) is not str
+            ):
+                return False
+        return all(type(name) is str for name in verdict["reviewed_by"])
+
+    @staticmethod
+    def _continue_schema_is_valid(verdict: dict) -> bool:
+        required = {
+            "claim",
+            "verdict",
+            "reason",
+            "missing",
+            "needs_agents",
+            "allow_unknown_progress",
+        }
+        return (
+            set(verdict) == required
+            and type(verdict["claim"]) is str
+            and type(verdict["verdict"]) is str
+            and type(verdict["reason"]) is str
+            and bool(verdict["reason"].strip())
+            and type(verdict["missing"]) is str
+            and bool(verdict["missing"].strip())
+            and type(verdict["needs_agents"]) is list
+            and bool(verdict["needs_agents"])
+            and all(type(name) is str for name in verdict["needs_agents"])
+            and type(verdict["allow_unknown_progress"]) is bool
+        )
 
     async def _host_summarize(
         self, claims_mgr: ClaimsManager, round_num: int | None = None,

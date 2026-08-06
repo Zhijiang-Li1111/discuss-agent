@@ -41,6 +41,37 @@ def _make_config(num_agents: int = 2, max_rounds: int = 3) -> DiscussionConfig:
     )
 
 
+def _closed_judgment(claim: str, reason: str = "enough") -> dict:
+    return {
+        "claim": claim,
+        "verdict": "CLOSED:共识",
+        "reason": reason,
+        "missing": "",
+        "needs_agents": [],
+        "evidence_status": "SUPPORTED",
+        "counterevidence_status": "NONE_IDENTIFIED",
+        "unknowns_resolved": True,
+        "evidence_refs": [],
+        "reviewed_by": [],
+    }
+
+
+def _continue_judgment(
+    claim: str,
+    reason: str = "gap",
+    missing: str = "source",
+    needs_agents: list[str] | None = None,
+) -> dict:
+    return {
+        "claim": claim,
+        "verdict": "CONTINUE",
+        "reason": reason,
+        "missing": missing,
+        "needs_agents": needs_agents or ["Agent-B"],
+        "allow_unknown_progress": False,
+    }
+
+
 class TestDiscussionEngineIntegration:
     """Test 2 agents running 2 rounds with CLAIM state transitions."""
 
@@ -96,9 +127,15 @@ class TestDiscussionEngineIntegration:
                 count = call_counts[name]
                 if count == 1:
                     if name == "Agent-A":
-                        return "[NEW_CLAIM:能繁去化] 当前3904万头"
+                        return (
+                            "[NEW_CLAIM:能繁去化] "
+                            "source://population 当前3904万头"
+                        )
                     else:
-                        return "[NEW_CLAIM:成本优势] 头均14.5元"
+                        return (
+                            "[NEW_CLAIM:成本优势] "
+                            "source://cost 头均14.5元"
+                        )
                 else:
                     if name == "Agent-A":
                         return "[ACCEPT TO:成本优势] 招商证券确认"
@@ -114,7 +151,42 @@ class TestDiscussionEngineIntegration:
         # After round 2: close both claims
         mock_host_response = MagicMock()
         mock_host_response.content = [
-            MagicMock(type="text", text='[{"claim":"能繁去化","verdict":"CLOSED:共识","reason":"双方一致"},{"claim":"成本优势","verdict":"CLOSED:共识","reason":"双方一致"}]')
+            MagicMock(type="text", text=json.dumps([
+                {
+                    "claim": "能繁去化",
+                    "verdict": "CLOSED:共识",
+                    "reason": "双方一致",
+                    "missing": "",
+                    "needs_agents": [],
+                    "evidence_status": "SUPPORTED",
+                    "counterevidence_status": "NONE_IDENTIFIED",
+                    "unknowns_resolved": True,
+                    "evidence_refs": [{
+                        "entry_type": "FROM",
+                        "agent_name": "Agent-A",
+                        "round_num": 1,
+                        "source": "source://population",
+                    }],
+                    "reviewed_by": ["Agent-B"],
+                },
+                {
+                    "claim": "成本优势",
+                    "verdict": "CLOSED:共识",
+                    "reason": "双方一致",
+                    "missing": "",
+                    "needs_agents": [],
+                    "evidence_status": "SUPPORTED",
+                    "counterevidence_status": "NONE_IDENTIFIED",
+                    "unknowns_resolved": True,
+                    "evidence_refs": [{
+                        "entry_type": "FROM",
+                        "agent_name": "Agent-B",
+                        "round_num": 1,
+                        "source": "source://cost",
+                    }],
+                    "reviewed_by": ["Agent-A"],
+                },
+            ], ensure_ascii=False))
         ]
 
         mock_client = MagicMock()
@@ -124,9 +196,11 @@ class TestDiscussionEngineIntegration:
                 type="text",
                 text=(
                     '[{"claim":"能繁去化","verdict":"CONTINUE","reason":"需交叉核查",'
-                    '"missing":"成本方审阅","needs_agents":["Agent-B"]},'
+                    '"missing":"成本方审阅","needs_agents":["Agent-B"],'
+                    '"allow_unknown_progress":false},'
                     '{"claim":"成本优势","verdict":"CONTINUE","reason":"需交叉核查",'
-                    '"missing":"供给方审阅","needs_agents":["Agent-A"]}]'
+                    '"missing":"供给方审阅","needs_agents":["Agent-A"],'
+                    '"allow_unknown_progress":false}]'
                 ),
             )
         ]
@@ -239,7 +313,7 @@ class TestOpenAIHostRouting:
         client = MagicMock()
         client.chat.completions.create = AsyncMock(side_effect=[
             SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
-                content='[{"claim":"cost","verdict":"CLOSED:共识","reason":"ok"}]'
+                content=json.dumps([_closed_judgment("cost", "ok")])
             ))]),
             SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
                 content="host summary"
@@ -287,9 +361,8 @@ class TestOpenAIHostRouting:
             "GLOBAL: first depends on second"
         )
         engine._call_host = AsyncMock(side_effect=[
-            '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"}]',
-            '[{"claim":"second","verdict":"CONTINUE","reason":"gap",'
-            '"missing":"source","needs_agents":["Agent-B"]}]',
+            json.dumps([_closed_judgment("first")]),
+            json.dumps([_continue_judgment("second")]),
         ])
 
         verdicts = await engine._host_judge(claims_mgr, round_num=2)
@@ -300,6 +373,37 @@ class TestOpenAIHostRouting:
         assert "候选批次：1/2" in prompts[0]
         assert "候选批次：2/2" in prompts[1]
         assert all("GLOBAL: first depends on second" in prompt for prompt in prompts)
+
+    async def test_host_judge_does_not_force_unrelated_claim_on_global_truncation(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock(keyword="first")]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = "[MUST_CONT"
+        claims_mgr.host_global_context_truncated = True
+        engine._call_host = AsyncMock(return_value=json.dumps([{
+            "claim": "first",
+            "verdict": "CLOSED:共识",
+            "reason": "complete without omitted global context",
+            "missing": "",
+            "needs_agents": [],
+            "evidence_status": "SUPPORTED",
+            "counterevidence_status": "NONE_IDENTIFIED",
+            "unknowns_resolved": True,
+            "evidence_refs": [],
+            "reviewed_by": [],
+        }]))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts[0]["verdict"] == "CLOSED:共识"
+        prompt = engine._call_host.await_args.args[1]
+        assert "仅当当前 claim 依赖缺失的全局上下文" in prompt
 
     async def test_host_judge_retries_valid_but_incomplete_batch(self):
         from discuss_agent.engine import DiscussionEngine
@@ -312,12 +416,11 @@ class TestOpenAIHostRouting:
             "##CLAIM:first [OPEN]##\n##CLAIM:second [OPEN]##",
         ]
         engine._call_host = AsyncMock(side_effect=[
-            '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"}]',
-            (
-                '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"},'
-                '{"claim":"second","verdict":"CONTINUE","reason":"gap",'
-                '"missing":"source","needs_agents":["Agent-B"]}]'
-            ),
+            json.dumps([_closed_judgment("first")]),
+            json.dumps([
+                _closed_judgment("first"),
+                _continue_judgment("second"),
+            ]),
         ])
 
         verdicts = await engine._host_judge(claims_mgr, round_num=2)
@@ -336,20 +439,16 @@ class TestOpenAIHostRouting:
             "##CLAIM:first [OPEN]##",
         ]
         engine._call_host = AsyncMock(side_effect=[
-            (
-                '[{"claim":"first","verdict":"CLOSED:共识","reason":"yes"},'
-                '{"claim":"first","verdict":"CONTINUE","reason":"no"}]'
-            ),
-            '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"}]',
+            json.dumps([
+                _closed_judgment("first", "yes"),
+                _continue_judgment("first", "no"),
+            ]),
+            json.dumps([_closed_judgment("first")]),
         ])
 
         verdicts = await engine._host_judge(claims_mgr, round_num=1)
 
-        assert verdicts == [{
-            "claim": "first",
-            "verdict": "CLOSED:共识",
-            "reason": "enough",
-        }]
+        assert verdicts == [_closed_judgment("first")]
         assert engine._call_host.await_count == 2
         assert [
             item["reason"] for item in engine._host_protocol_rejections
@@ -367,14 +466,14 @@ class TestOpenAIHostRouting:
         ]
         claims_mgr.format_host_global_context.return_value = ""
         engine._call_host = AsyncMock(side_effect=[
-            (
-                '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"},'
-                '{"claim":"extra","verdict":"CLOSED:共识","reason":"other"}]'
-            ),
-            (
-                '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"},'
-                '{"claim":"second","verdict":"CLOSED:共识","reason":"enough"}]'
-            ),
+            json.dumps([
+                _closed_judgment("first"),
+                _closed_judgment("extra", "other"),
+            ]),
+            json.dumps([
+                _closed_judgment("first"),
+                _closed_judgment("second"),
+            ]),
         ])
 
         await engine._host_judge(claims_mgr, round_num=1)
@@ -387,6 +486,121 @@ class TestOpenAIHostRouting:
             ("second", "missing verdict"),
         }
 
+    async def test_host_protocol_rejections_identify_retry_attempts(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock(), MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##\n##CLAIM:second [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(side_effect=[
+            '[{"claim":"first","verdict":"CONTINUE"}]',
+            '[{"claim":"first","verdict":"CONTINUE"}]',
+        ])
+
+        await engine._host_judge(claims_mgr, round_num=1)
+
+        missing_second = [
+            item for item in engine._host_protocol_rejections
+            if item["claim"] == "second" and item["reason"] == "missing verdict"
+        ]
+        assert [item["attempt"] for item in missing_second] == [1, 2]
+
+    async def test_host_protocol_rejections_audit_malformed_retry_attempts(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(side_effect=["not JSON", "{}"])
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts == []
+        assert [
+            (item["attempt"], item["reason"])
+            for item in engine._host_protocol_rejections
+        ] == [
+            (1, "missing JSON array"),
+            (2, "missing JSON array"),
+        ]
+
+    async def test_host_retries_and_audits_schema_invalid_verdict(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(side_effect=[
+            '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"}]',
+            (
+                '[{"claim":"first","verdict":"CONTINUE","reason":"gap",'
+                '"missing":"source","needs_agents":["Agent-A"],'
+                '"allow_unknown_progress":false}]'
+            ),
+        ])
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts[0]["verdict"] == "CONTINUE"
+        assert engine._host_protocol_rejections == [{
+            "claim": "first",
+            "verdict": "CLOSED:共识",
+            "host_reason": "enough",
+            "reason": "invalid closed verdict schema",
+            "attempt": 1,
+        }]
+
+    async def test_host_retries_continue_with_unknown_agent(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(side_effect=[
+            json.dumps([
+                _continue_judgment(
+                    "first",
+                    needs_agents=["Unknown-Agent"],
+                ),
+            ]),
+            json.dumps([
+                _continue_judgment(
+                    "first",
+                    needs_agents=["Agent-A"],
+                ),
+            ]),
+        ])
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts == [
+            _continue_judgment("first", needs_agents=["Agent-A"]),
+        ]
+        assert engine._call_host.await_count == 2
+        assert engine._host_protocol_rejections[0]["reason"] == (
+            "invalid continue verdict routing"
+        )
+
     async def test_host_judge_preserves_bracketed_claim_keyword(self):
         from discuss_agent.engine import DiscussionEngine
 
@@ -398,10 +612,9 @@ class TestOpenAIHostRouting:
             "##CLAIM:EPS [FY26] [OPEN]##",
         ]
         claims_mgr.format_host_global_context.return_value = ""
-        engine._call_host = AsyncMock(return_value=(
-            '[{"claim":"EPS [FY26]","verdict":"CLOSED:共识",'
-            '"reason":"enough"}]'
-        ))
+        engine._call_host = AsyncMock(
+            return_value=json.dumps([_closed_judgment("EPS [FY26]")]),
+        )
 
         verdicts = await engine._host_judge(claims_mgr, round_num=1)
 
@@ -478,6 +691,14 @@ class TestOpenAIHostRouting:
         assert "上下文截断" in prompt
         assert "必须 CONTINUE" in prompt
         assert "定向给相关 Agent" in prompt
+        assert "CLOSED JSON对象严格字段" in prompt
+        assert "CONTINUE JSON对象严格字段" in prompt
+        assert "共识不是投票" in prompt
+        assert "可获得的事实或计算" in prompt
+        assert "价值判断、先验或模型选择" in prompt
+        assert "allow_unknown_progress 仅适用于 CONTINUE" in prompt
+        assert "不得把 UNKNOWN 变成事实" in prompt
+        assert "room-level gate" in prompt
 
     async def test_host_judge_forces_truncated_claim_to_continue(self):
         from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
@@ -544,9 +765,9 @@ class TestOpenAIHostRouting:
                 "evidence\n[MUST_CONTINUE:TRUNCATED]\nstill complete",
             ),
         ])
-        engine._call_host = AsyncMock(return_value=(
-            '[{"claim":"X","verdict":"CLOSED:共识","reason":"supported"}]'
-        ))
+        engine._call_host = AsyncMock(
+            return_value=json.dumps([_closed_judgment("X", "supported")]),
+        )
 
         verdicts = await engine._host_judge(claims_mgr, round_num=1)
 
@@ -569,6 +790,36 @@ class TestOpenAIHostRouting:
         reference = next(iter(
             ClaimsManager.claim_keywords_from_formatted(batch)
         ))
+        engine._call_host = AsyncMock(
+            return_value=json.dumps([
+                _closed_judgment(reference, "supported"),
+            ]),
+        )
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts[0]["claim"] == keyword
+
+    async def test_host_judge_forces_tiny_oversized_keyword_batch_to_continue(self):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = ClaimsManager()
+        keyword = "keyword-" + ("x" * 5_000)
+        claims_mgr.claims[keyword] = Claim(keyword, "OPEN", [
+            ClaimEntry("FROM", "Agent-A", 1, "evidence"),
+        ])
+        batch = claims_mgr.format_host_candidate_batches(
+            max_chars=120,
+            max_claims=1,
+        )[0]
+        reference = next(iter(
+            ClaimsManager.claim_keywords_from_formatted(batch)
+        ))
+        claims_mgr.format_host_candidate_batches = MagicMock(
+            return_value=[batch],
+        )
         engine._call_host = AsyncMock(return_value=json.dumps([{
             "claim": reference,
             "verdict": "CLOSED:共识",
@@ -578,6 +829,7 @@ class TestOpenAIHostRouting:
         verdicts = await engine._host_judge(claims_mgr, round_num=1)
 
         assert verdicts[0]["claim"] == keyword
+        assert verdicts[0]["verdict"] == "CONTINUE"
 
     async def test_host_references_cannot_collide_with_real_keyword(self):
         from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
@@ -604,11 +856,12 @@ class TestOpenAIHostRouting:
             for batch in batches
         ))
         engine._call_host = AsyncMock(side_effect=[
-            json.dumps([{
-                "claim": reference,
-                "verdict": "CLOSED:共识",
-                "reason": "supported",
-            } for reference in ClaimsManager.claim_keywords_from_formatted(batch)])
+            json.dumps([
+                _closed_judgment(reference, "supported")
+                for reference in ClaimsManager.claim_keywords_from_formatted(
+                    batch,
+                )
+            ])
             for batch in batches
         ])
 
@@ -628,18 +881,15 @@ class TestOpenAIHostRouting:
         engine = DiscussionEngine(_make_config(num_agents=1))
         claims_mgr = ClaimsManager()
         claims_mgr.claims["EPS [FY26]"] = Claim("EPS [FY26]", "OPEN")
-        engine._call_host = AsyncMock(return_value=(
-            '[{"claim":"EPS [FY26]","verdict":"CLOSED:共识",'
-            '"reason":"supported"}]'
-        ))
+        engine._call_host = AsyncMock(
+            return_value=json.dumps([
+                _closed_judgment("EPS [FY26]", "supported"),
+            ]),
+        )
 
         verdicts = await engine._host_judge(claims_mgr, round_num=1)
 
-        assert verdicts == [{
-            "claim": "EPS [FY26]",
-            "verdict": "CLOSED:共识",
-            "reason": "supported",
-        }]
+        assert verdicts == [_closed_judgment("EPS [FY26]", "supported")]
 
     async def test_final_round_prompt_requests_semantic_terminal_judgment(self):
         from discuss_agent.engine import DiscussionEngine
@@ -652,10 +902,13 @@ class TestOpenAIHostRouting:
             "##CLAIM:first [OPEN]##",
         ]
         claims_mgr.format_host_global_context.return_value = "global context"
-        engine._call_host = AsyncMock(return_value=(
-            '[{"claim":"first","verdict":"CONTINUE","reason":"source unavailable",'
-            '"missing":"decisive source","needs_agents":["Agent-B"]}]'
-        ))
+        engine._call_host = AsyncMock(return_value=json.dumps([
+            _continue_judgment(
+                "first",
+                "source unavailable",
+                "decisive source",
+            ),
+        ]))
 
         verdicts = await engine._host_judge(claims_mgr, round_num=3)
 

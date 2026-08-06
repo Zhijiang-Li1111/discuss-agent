@@ -69,7 +69,7 @@ _MISSING_PREFIX = "MISSING："
 _ROUTING_PREFIX = "ROUTING_JSON："
 
 # Regex for parsing agent outputs
-_MARKER_TARGET = r"((?:[^\[\]\n]|\[[^\[\]\n]*\])+)"
+_MARKER_TARGET = r"((?:[^\[\]\n]|\[[^\[\]\n]*\])*)"
 _REBUTTAL_RE = re.compile(
     rf"\[REBUTTAL\s+TO:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
 )
@@ -78,6 +78,9 @@ _ACCEPT_RE = re.compile(
 )
 _NEW_CLAIM_RE = re.compile(
     rf"\[NEW_CLAIM:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
+)
+_INDENTED_MARKER_RE = re.compile(
+    r"^[ \t]+\[(?:REBUTTAL TO|ACCEPT TO|NEW_CLAIM):",
 )
 
 
@@ -93,6 +96,11 @@ class ParsedResponse:
 def parse_agent_output(text: str) -> list[ParsedResponse]:
     """Parse an agent's raw output into structured responses."""
     responses: list[ParsedResponse] = []
+    text = "\n".join(
+        line
+        for line in text.splitlines()
+        if not _INDENTED_MARKER_RE.match(line)
+    )
     parts = re.split(
         r"(?m)(?=^\[(?:REBUTTAL TO|ACCEPT TO|NEW_CLAIM):)",
         text,
@@ -139,6 +147,7 @@ class ClaimsManager:
         self.topic: str = ""
         self.current_round: int = 0
         self.unmatched_responses: list[dict[str, object]] = []
+        self.host_global_context_truncated = False
 
     @staticmethod
     def _resolve_response_targets(target: str, known_targets: set[str]) -> tuple[list[str], list[str]]:
@@ -340,7 +349,28 @@ class ClaimsManager:
         The program automatically adds FROM tags — agents don't need to include them.
         """
         for output in agent_outputs:
+            for line in output.raw_text.splitlines():
+                if _INDENTED_MARKER_RE.match(line):
+                    violation = {
+                        "agent_name": output.agent_name,
+                        "round_num": output.round_num,
+                        "response_type": "PROTOCOL_VIOLATION",
+                        "content": line,
+                    }
+                    parsed_marker = parse_agent_output(line.lstrip())
+                    if parsed_marker:
+                        violation["target"] = parsed_marker[0].target
+                    self.unmatched_responses.append(violation)
             for response in output.parsed:
+                if not response.target:
+                    self.unmatched_responses.append({
+                        "agent_name": output.agent_name,
+                        "round_num": output.round_num,
+                        "response_type": "INVALID_TARGET",
+                        "target": "",
+                        "content": response.content,
+                    })
+                    continue
                 if response.response_type == "NEW_CLAIM":
                     if response.target in self.claims:
                         self.unmatched_responses.append({
@@ -402,6 +432,15 @@ class ClaimsManager:
     def get_host_candidates(self) -> list[Claim]:
         """Return every OPEN claim for semantic Host review."""
         return self.get_open_claims()
+
+    def has_protocol_violation(self, keyword: str, round_num: int) -> bool:
+        """Return whether this round contains a malformed marker for a claim."""
+        return any(
+            item.get("response_type") == "PROTOCOL_VIOLATION"
+            and item.get("target") == keyword
+            and item.get("round_num") == round_num
+            for item in self.unmatched_responses
+        )
 
     @staticmethod
     def claim_keywords_from_formatted(text: str) -> set[str]:
@@ -465,6 +504,15 @@ class ClaimsManager:
             ):
                 truncated.add(current)
         return truncated
+
+    @staticmethod
+    def global_context_is_truncated(text: str) -> bool:
+        """Report whether global Host context is explicitly incomplete."""
+        lines = text.splitlines()
+        return bool(
+            lines
+            and lines[0] == "[GLOBAL_CONTEXT_TRUNCATED]"
+        )
 
     @staticmethod
     def _host_request(claim: Claim) -> tuple[set[str], str]:
@@ -591,7 +639,9 @@ class ClaimsManager:
         reference = reference or cls.host_reference(claim.keyword)
         header = f"##CLAIM:{reference} [{claim.status}]##"
         keyword_preview = ""
+        keyword_context_truncated = False
         if reference != claim.keyword:
+            keyword_context_truncated = len(claim.keyword) > 256
             keyword_preview = (
                 "\nKEYWORD_PREVIEW:"
                 + cls._truncate_ends(claim.keyword, 256)
@@ -623,22 +673,43 @@ class ClaimsManager:
             + sum(len(prefix) for prefix in prefixes)
         )
         if identity_size + len(omission_marker) > limit:
-            marker = "[MUST_CONTINUE:TRUNCATED]\n"
+            marker = "[MUST_CONTINUE:TRUNCATED]"
+            required_prefix = header + "\n" + marker
+            if len(required_prefix) > limit:
+                return ""
             detail = (
                 "...[反驳身份截断：超出上下文安全上限；"
-                "部分身份未展开，必须CONTINUE，不得据此收敛]...\n"
+                "部分身份未展开，必须CONTINUE，不得据此收敛]..."
             )
-            if len(marker) + len(detail) <= limit:
-                marker += detail
-            prefix = header + keyword_preview + "\n" + marker
-            if limit <= len(prefix):
-                return prefix[:max(0, limit)]
-            identities = "\n".join(prefixes) + omission_marker
-            return prefix + cls._truncate_ends(identities, limit - len(prefix))
+            details = "\n".join(
+                part
+                for part in (
+                    keyword_preview.removeprefix("\n"),
+                    detail,
+                    "\n".join(prefixes) + omission_marker,
+                )
+                if part
+            )
+            if not details:
+                return required_prefix
+            return (
+                required_prefix
+                + "\n"
+                + cls._truncate_ends(
+                    details,
+                    limit - len(required_prefix) - 1,
+                )
+            )
+        context_marker = (
+            "\n[MUST_CONTINUE:TRUNCATED]"
+            if keyword_context_truncated
+            else ""
+        )
         fixed_size = (
             len(header)
             + len(keyword_preview)
             + len(omission_marker)
+            + len(context_marker)
             + separators
             + sum(len(prefix) for prefix in prefixes)
             + len(selected)
@@ -654,11 +725,10 @@ class ClaimsManager:
             body_limit + (1 if index < body_extra else 0)
             for index in range(len(selected))
         ]
-        context_marker = ""
         if any(
             len(entry.content) > entry_limit
             for entry, entry_limit in zip(selected, entry_limits)
-        ):
+        ) and not context_marker:
             context_marker = "\n[MUST_CONTINUE:TRUNCATED]"
             content_budget = max(
                 0,
@@ -701,6 +771,12 @@ class ClaimsManager:
                 min(4_000, max_chars),
                 reference=references[claim.keyword],
             )
+            if not block:
+                continue
+            if self.claim_keywords_from_formatted(block) != {
+                references[claim.keyword],
+            }:
+                continue
             block_size = len(block) + (2 if current else 0)
             if current and (
                 current_size + block_size > max_chars
@@ -717,7 +793,12 @@ class ClaimsManager:
         return batches
 
     def format_host_global_context(self, max_chars: int = 40_000) -> str:
-        """Summarize every OPEN claim for cross-batch semantic consistency."""
+        """Summarize every OPEN claim for cross-batch semantic consistency.
+
+        The completeness marker may exceed an impossibly small ``max_chars`` so
+        truncation remains machine-recognizable.
+        """
+        self.host_global_context_truncated = False
         claims = self.get_host_candidates()
         if not claims:
             return ""
@@ -727,6 +808,8 @@ class ClaimsManager:
             for claim in claims
         ]
         fixed_size = sum(len(prefix) for prefix in prefixes) + len(claims) - 1
+        if fixed_size > max_chars:
+            self.host_global_context_truncated = True
         available = max(0, max_chars - fixed_size)
         base_content_limit, extra = divmod(available, len(claims))
         lines: list[str] = []
@@ -755,6 +838,8 @@ class ClaimsManager:
                 + max(0, len(labels) - 1) * 3
             )
             if content_limit <= summary_overhead:
+                if critical:
+                    self.host_global_context_truncated = True
                 summary = self._truncate_ends(
                     " | ".join(labels),
                     content_limit,
@@ -772,15 +857,34 @@ class ClaimsManager:
                     limit = body_limit + (
                         1 if entry_index < body_extra else 0
                     )
+                    content = entry.content.replace("\n", " ")
+                    if len(content) > limit:
+                        self.host_global_context_truncated = True
                     summaries.append(
                         label + self._truncate_ends(
-                            entry.content.replace("\n", " "),
+                            content,
                             limit,
                         )
                     )
                 summary = " | ".join(summaries)
             lines.append(prefix + summary)
-        return self._truncate_ends("\n".join(lines), max_chars)
+        rendered = "\n".join(lines)
+        if (
+            len(rendered) <= max_chars
+            and not self.host_global_context_truncated
+        ):
+            return rendered
+        self.host_global_context_truncated = True
+        marker = "[GLOBAL_CONTEXT_TRUNCATED]"
+        if max_chars < len(marker):
+            return marker
+        remaining = max_chars - len(marker)
+        if remaining <= 1:
+            return marker
+        return marker + "\n" + self._truncate_ends(
+            rendered,
+            remaining - 1,
+        )
 
     @classmethod
     def _bounded_blocks(
@@ -1016,8 +1120,19 @@ class ClaimsManager:
             parts.append("\n## 上轮协议冲突（请按精确关键词修正）")
             audit_blocks: list[str] = []
             for item in recent_unmatched:
+                response_type = item.get("response_type")
+                if response_type == "PROTOCOL_VIOLATION":
+                    content = json.dumps(
+                        item.get("content", ""),
+                        ensure_ascii=False,
+                    )
+                    audit_blocks.append(
+                        f"- PROTOCOL_VIOLATION：缩进 marker 未执行；"
+                        f"原始内容={content}；请将协议 marker 放在 column 0。"
+                    )
+                    continue
                 target = str(item["target"])
-                if item.get("response_type") == "DUPLICATE_NEW_CLAIM":
+                if response_type == "DUPLICATE_NEW_CLAIM":
                     content = json.dumps(
                         item.get("content", ""),
                         ensure_ascii=False,
@@ -1042,6 +1157,7 @@ class ClaimsManager:
             "\n## 你的任务\n"
             "根据你的职责和专业判断审阅 OPEN CLAIMS；不要用固定数量、固定轮次或全员回应代替实质判断。\n"
             "优先处理 HOST定向请求。其他 claim 仅在与你的职责或证据相关时回应；没有实质增量时不要机械重复。\n"
+            "- 所有协议 marker 必须从 column 0 开始；缩进 marker 仅记录为协议 warning，不会执行。\n"
             "- [REBUTTAL TO:关键词] 反驳 + 证据\n"
             "- [ACCEPT TO:关键词] 接受 + 理由\n"
             "- 每个 ACCEPT/REBUTTAL marker 只能写一个精确关键词，不得批量列出。\n"
@@ -1077,6 +1193,7 @@ class ClaimsManager:
             "也不得用固定回应数或固定轮次代替判断。\n"
             "证据不足时明确缺口及最适合补证的角色，不要猜测或机械附和。\n\n"
             "**输出格式要求：**\n"
+            "- 所有协议 marker 必须从 column 0 开始；缩进 marker 仅记录为协议 warning，不会执行。\n"
             "- [NEW_CLAIM:关键词] 你的论点和证据\n"
             "- 每个独立论点用一个 NEW_CLAIM 标记\n"
             "- 可以随时用 research_search 或 web_search 搜索证据。"

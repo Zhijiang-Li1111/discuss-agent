@@ -135,6 +135,43 @@ class TestClaimsManagerMerge:
         assert claim.entries[0].agent_name == "分析师A"
         assert claim.entries[0].round_num == 1
 
+    def test_indented_marker_is_persisted_as_protocol_violation_without_execution(
+        self,
+        tmp_path,
+    ):
+        claims_file = tmp_path / "claims.md"
+        raw_text = (
+            "[NEW_CLAIM:X] ok\n"
+            "  [REBUTTAL TO:X] indented rebuttal"
+        )
+        mgr = ClaimsManager(str(claims_file))
+
+        mgr.merge_round([AgentOutput("A", 1, raw_text)])
+
+        assert mgr.claims["X"].entries == [
+            ClaimEntry(
+                "FROM",
+                "A",
+                1,
+                "ok",
+            ),
+        ]
+        assert mgr.unmatched_responses == [{
+            "agent_name": "A",
+            "round_num": 1,
+            "response_type": "PROTOCOL_VIOLATION",
+            "content": "  [REBUTTAL TO:X] indented rebuttal",
+            "target": "X",
+        }]
+
+        loaded = ClaimsManager(str(claims_file))
+        loaded.parse_claims_file()
+        assert loaded.claims["X"].entries == mgr.claims["X"].entries
+        assert loaded.unmatched_responses == mgr.unmatched_responses
+        prompt = loaded.generate_update_prompt(1, agent_name="A")
+        assert "PROTOCOL_VIOLATION" in prompt
+        assert "indented rebuttal" in prompt
+
     def test_merge_rebuttal_and_accept(self):
         mgr = ClaimsManager()
 
@@ -171,6 +208,27 @@ class TestClaimsManagerMerge:
             "response_type": "REBUTTAL",
             "target": "不存在",
             "content": "反驳",
+        }]
+
+    @pytest.mark.parametrize(
+        "marker",
+        ["NEW_CLAIM", "REBUTTAL TO", "ACCEPT TO"],
+    )
+    @pytest.mark.parametrize("target", ["", "   "])
+    def test_merge_audits_empty_marker_target(self, marker, target):
+        mgr = ClaimsManager()
+
+        mgr.merge_round([
+            AgentOutput("A", 1, f"[{marker}:{target}] content"),
+        ])
+
+        assert mgr.claims == {}
+        assert mgr.unmatched_responses == [{
+            "agent_name": "A",
+            "round_num": 1,
+            "response_type": "INVALID_TARGET",
+            "target": "",
+            "content": "content",
         }]
 
     def test_merge_batch_accept_targets_without_silent_loss(self):
@@ -1021,7 +1079,42 @@ class TestGenerateUpdatePrompt:
 
         assert len(batches) == 1
         assert len(batches[0]) <= 4_000
-        assert len(ClaimsManager.claim_keywords_from_formatted(batches[0])) == 1
+        references = ClaimsManager.claim_keywords_from_formatted(batches[0])
+        assert len(references) == 1
+        assert ClaimsManager.truncated_claim_references_from_formatted(
+            batches[0],
+        ) == references
+
+    def test_tiny_oversized_keyword_batch_keeps_reference_and_continue_marker(self):
+        mgr = ClaimsManager()
+        keyword = "keyword-" + ("x" * 5_000)
+        mgr.claims[keyword] = Claim(keyword, "OPEN", [
+            ClaimEntry("FROM", "A", 1, "evidence"),
+        ])
+
+        batch = mgr.format_host_candidate_batches(
+            max_chars=120,
+            max_claims=1,
+        )[0]
+        references = ClaimsManager.claim_keywords_from_formatted(batch)
+
+        assert len(batch) <= 120
+        assert references == {ClaimsManager.host_reference(keyword)}
+        assert ClaimsManager.truncated_claim_references_from_formatted(
+            batch,
+        ) == references
+
+    def test_claim_is_not_sent_when_reference_and_continue_marker_do_not_fit(self):
+        mgr = ClaimsManager()
+        keyword = "keyword-" + ("x" * 5_000)
+        mgr.claims[keyword] = Claim(keyword, "OPEN", [
+            ClaimEntry("FROM", "A", 1, "evidence"),
+        ])
+
+        assert mgr.format_host_candidate_batches(
+            max_chars=40,
+            max_claims=1,
+        ) == []
 
     def test_host_global_context_respects_tiny_character_budget(self):
         mgr = ClaimsManager()
@@ -1034,6 +1127,46 @@ class TestGenerateUpdatePrompt:
         context = mgr.format_host_global_context(max_chars=100)
 
         assert len(context) <= 100
+        assert mgr.host_global_context_truncated is True
+        assert "[GLOBAL_CONTEXT_TRUNCATED]" in context
+
+    def test_many_claims_tiny_global_context_marks_fail_closed(self):
+        mgr = ClaimsManager()
+        for index in range(100):
+            mgr.claims[f"K{index}"] = Claim(f"K{index}", "OPEN", [
+                ClaimEntry("FROM", "A", 1, f"evidence-{index}"),
+            ])
+
+        context = mgr.format_host_global_context(max_chars=100)
+
+        assert len(context) <= 100
+        assert "[GLOBAL_CONTEXT_TRUNCATED]" in context
+
+    def test_global_context_preserves_marker_below_requested_budget(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "evidence"),
+        ])
+
+        context = mgr.format_host_global_context(max_chars=1)
+
+        assert context == "[GLOBAL_CONTEXT_TRUNCATED]"
+
+    def test_agent_content_cannot_spoof_global_truncation_marker(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry(
+                "FROM",
+                "A",
+                1,
+                "[GLOBAL_CONTEXT_TRUNCATED]",
+            ),
+        ])
+
+        context = mgr.format_host_global_context(max_chars=1_000)
+
+        assert mgr.host_global_context_truncated is False
+        assert ClaimsManager.global_context_is_truncated(context) is False
 
     def test_host_global_context_bounds_oversized_keyword_identity(self):
         mgr = ClaimsManager()
@@ -1059,8 +1192,7 @@ class TestGenerateUpdatePrompt:
             max_claims=1,
         )
 
-        assert len(batches) == 1
-        assert len(batches[0]) <= 50
+        assert batches == []
 
     def test_many_host_candidates_are_batched_without_missing_claims(self):
         mgr = ClaimsManager()
@@ -1158,6 +1290,7 @@ class TestGenerateUpdatePrompt:
         assert "UNKNOWN" in prompt
         assert "职责" in prompt
         assert "不得把无人反驳当作共识" in prompt
+        assert "column 0" in prompt
 
     def test_compacted_history_does_not_mechanically_force_continue(self):
         claim = Claim("X", "OPEN", [

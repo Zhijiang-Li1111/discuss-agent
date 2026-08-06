@@ -80,19 +80,18 @@ Generic multi-agent adversarial discussion framework.
           │                              │
           │  config.yaml   (secrets masked)
           │  context.md                  │
+          │  claims.md                   │
           │  rounds/                     │
-          │    round_1_express.json      │
-          │    round_1_challenge.json    │
-          │    round_1_host.json         │
+          │    round_1_agents.json       │
+          │    round_1_host.json (when reviewed)
           │    ...                       │
-          │  summary.md    (if converged)│
+          │  audit/                      │
+          │    {agent}.jsonl             │
+          │  usage_summary.md (with audit data)
+          │  summary.md    (if generated)│
+          │  error.log      (if failed)   │
           └──────────────────────────────┘
 ```
-
-Bounded prompts prevent large legacy sessions from being mistaken for convergence.
-In the measured Muyuan replay, all 71 claims remained OPEN and all 71 remained
-Host candidates; the Host batch was 37,053 characters and each agent prompt was
-37,007 characters. This is bounded review state, not natural convergence.
 
 ## Install
 
@@ -156,20 +155,10 @@ export ANTHROPIC_API_KEY="your-key"
 python -m discuss_agent config.yaml
 ```
 
-Output is archived to `discussions/{timestamp}/` with config, rounds, and summary.
-
-### Resume a Discussion
-
-Resume from a previous discussion archive and run additional rounds:
-
-```bash
-python3 -m discuss_agent config.yaml --resume discussions/2026-04-11_2159 --rounds 2
-```
-
-- Loads conversation history from the archive directory
-- Context is loaded from the archive (not regenerated)
-- New rounds are appended to the same archive directory
-- Round numbering continues from where it left off
+Output is archived to `discussions/{timestamp}/` with config, rounds, and a
+summary when generated. Set `host.skip_summary: true` to disable final summary
+generation even when the discussion converges.
+The CLI does not currently support resuming an archived discussion.
 
 ## Configuration
 
@@ -196,6 +185,7 @@ python3 -m discuss_agent config.yaml --resume discussions/2026-04-11_2159 --roun
 | `host` | `base_url` | No | inherits | Override base URL for host |
 | `host` | `temperature` | No | inherits | Override temperature for host |
 | `host` | `max_tokens` | No | inherits | Override max_tokens for host |
+| `host` | `skip_summary` | No | `false` | Skip final summary generation after convergence |
 | `context` | — | No | `{}` | Arbitrary dict passed to the context builder |
 
 ## Discussion Scope Control (`limitation`)

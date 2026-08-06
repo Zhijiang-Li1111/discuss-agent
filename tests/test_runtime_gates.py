@@ -29,6 +29,51 @@ def _config(*, min_rounds=1, max_rounds=3, strict=False, tools=None, extra_tools
     )
 
 
+def _reviewed_claim(
+    keyword="X",
+    *,
+    proposer="A",
+    reviewer="B",
+    source="source://primary",
+):
+    from discuss_agent.claims import Claim, ClaimEntry
+
+    return Claim(keyword, "OPEN", [
+        ClaimEntry("FROM", proposer, 1, f"supported by {source}"),
+        ClaimEntry("ACCEPT", reviewer, 1, "independently reviewed"),
+    ])
+
+
+def _closed_verdict(
+    claim="X",
+    *,
+    proposer="A",
+    reviewer="B",
+    source="source://primary",
+    evidence_round=1,
+    **overrides,
+):
+    verdict = {
+        "claim": claim,
+        "verdict": "CLOSED:共识",
+        "reason": "source verified and independently reviewed",
+        "missing": "",
+        "needs_agents": [],
+        "evidence_status": "SUPPORTED",
+        "counterevidence_status": "NONE_IDENTIFIED",
+        "unknowns_resolved": True,
+        "evidence_refs": [{
+            "entry_type": "FROM",
+            "agent_name": proposer,
+            "round_num": evidence_round,
+            "source": source,
+        }],
+        "reviewed_by": [reviewer],
+    }
+    verdict.update(overrides)
+    return verdict
+
+
 def test_config_strict_tool_loading_defaults_false_and_parses_true(tmp_path):
     from discuss_agent.config import ConfigLoader
 
@@ -44,6 +89,27 @@ def test_config_strict_tool_loading_defaults_false_and_parses_true(tmp_path):
     raw["discussion"]["strict_tool_loading"] = True
     path.write_text(yaml.safe_dump(raw))
     assert ConfigLoader.load(str(path)).strict_tool_loading is True
+
+
+def test_readme_matches_current_cli_and_archive_layout():
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+
+    assert "--resume" not in readme
+    assert "--rounds" not in readme
+    assert "round_1_express.json" not in readme
+    assert "round_1_challenge.json" not in readme
+    assert "round_1_agents.json" in readme
+    assert "round_1_host.json" in readme
+    assert "claims.md" in readme
+    assert "audit/" in readme
+    assert "usage_summary.md" in readme
+    assert "summary.md    (if generated)" in readme
+    assert "summary when generated" in readme
+    assert "skip_summary" in readme
+    assert "round_1_host.json (when reviewed)" in readme
+    assert "usage_summary.md (with audit data)" in readme
+    assert "In the measured Muyuan replay" not in readme
+    assert "does not currently support resuming" in readme
 
 
 @patch("discuss_agent.engine.generate_usage_summary")
@@ -73,7 +139,7 @@ async def test_natural_convergence_ignores_legacy_min_rounds(
         async def send(_prompt):
             counts[name] += 1
             if counts[name] == 1:
-                return f"[NEW_CLAIM:item-{name}] proposal"
+                return f"[NEW_CLAIM:item-{name}] source://item-{name}"
             other = "B" if name == "A" else "A"
             return f"[ACCEPT TO:item-{other}] accepted"
 
@@ -102,8 +168,12 @@ async def test_natural_convergence_ignores_legacy_min_rounds(
             },
         ],
         [
-            {"claim": "item-A", "verdict": "CLOSED:共识", "reason": "ok"},
-            {"claim": "item-B", "verdict": "CLOSED:共识", "reason": "ok"},
+            _closed_verdict(
+                "item-A", proposer="A", reviewer="B", source="source://item-A",
+            ),
+            _closed_verdict(
+                "item-B", proposer="B", reviewer="A", source="source://item-B",
+            ),
         ],
     ])
 
@@ -136,14 +206,21 @@ async def test_host_can_semantically_close_claim_in_round_one(
 
     def conversation(**kwargs):
         conv = MagicMock(messages=[])
-        text = "[NEW_CLAIM:sufficient] evidence" if kwargs["agent_name"] == "A" else ""
+        text = (
+            "[NEW_CLAIM:sufficient] source://round-one"
+            if kwargs["agent_name"] == "A"
+            else "[ACCEPT TO:sufficient] independently reviewed"
+        )
         conv.send = AsyncMock(return_value=text)
         return conv
 
     MockConversation.side_effect = conversation
     engine = DiscussionEngine(config)
     engine._host_judge = AsyncMock(return_value=[
-        {"claim": "sufficient", "verdict": "CLOSED:共识", "reason": "enough"},
+        _closed_verdict(
+            "sufficient",
+            source="source://round-one",
+        ),
     ])
 
     result = await engine.run()
@@ -191,13 +268,14 @@ async def test_silent_agents_do_not_block_host_review_of_existing_claims(
             "needs_agents": ["A"],
             "allow_unknown_progress": False,
         }],
-        [{"claim": "X", "verdict": "CLOSED:共识", "reason": "sufficient"}],
+        [_closed_verdict()],
     ])
 
     result = await engine.run()
 
     assert result.converged is True
     assert result.rounds_completed == 2
+    assert result.remaining_disputes == []
     assert [call.args[1] for call in engine._host_judge.await_args_list] == [1, 2]
 
 
@@ -271,22 +349,167 @@ def test_host_verdicts_record_mature_claim_omitted_by_host():
     }]
 
 
+def test_unsupported_unreviewed_claim_cannot_close_without_traceable_evidence():
+    from discuss_agent.claims import AgentOutput, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.merge_round([
+        AgentOutput("A", 1, "[NEW_CLAIM:X] unsupported assertion; no evidence"),
+    ])
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr,
+        [{
+            "claim": "X",
+            "verdict": "CLOSED:共识",
+            "reason": "no one objected",
+            "missing": "",
+            "needs_agents": [],
+        }],
+        {"X"},
+        round_num=1,
+    )
+
+    assert accepted == []
+    assert rejected[0]["reason"] == "invalid closed verdict schema"
+    assert mgr.claims["X"].status == "OPEN"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"unresolved_evidence": "missing source"},
+        {"allow_unknown_progress": False},
+        {"missing": None},
+        {"needs_agents": ()},
+        {"evidence_status": "UNVERIFIED"},
+        {"counterevidence_status": "IGNORED"},
+        {"unknowns_resolved": False},
+        {"unknowns_resolved": 1},
+        {"reviewed_by": ("B",)},
+    ],
+)
+def test_closed_verdict_uses_strict_schema(mutation):
+    from discuss_agent.claims import ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims["X"] = _reviewed_claim()
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr,
+        [_closed_verdict(**mutation)],
+        {"X"},
+        round_num=1,
+    )
+
+    assert accepted == []
+    assert rejected[0]["reason"] == "invalid closed verdict schema"
+    assert mgr.claims["X"].status == "OPEN"
+
+
+def test_closed_semantic_metadata_is_host_judgment_not_runtime_gate():
+    from discuss_agent.claims import Claim, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims["X"] = Claim("X", "OPEN")
+    verdict = _closed_verdict(evidence_refs=[], reviewed_by=[])
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr,
+        [verdict],
+        {"X"},
+        round_num=1,
+    )
+
+    assert accepted == [verdict]
+    assert rejected == []
+    assert mgr.claims["X"].status == "CLOSED:共识"
+
+
+def test_same_round_indented_protocol_marker_warns_without_semantic_gate():
+    from discuss_agent.claims import AgentOutput, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.merge_round([
+        AgentOutput("A", 1, "[NEW_CLAIM:X] source://primary"),
+        AgentOutput(
+            "B",
+            1,
+            "[ACCEPT TO:X] independently reviewed\n"
+            "  [REBUTTAL TO:X] malformed counterevidence",
+        ),
+    ])
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr,
+        [_closed_verdict()],
+        {"X"},
+        round_num=1,
+    )
+
+    assert accepted == [_closed_verdict()]
+    assert rejected == []
+    assert mgr.claims["X"].status == "CLOSED:共识"
+    assert mgr.unmatched_responses[-1]["response_type"] == "PROTOCOL_VIOLATION"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"unexpected": "field"},
+        {"allow_unknown_progress": "false"},
+        {"needs_agents": ("A",)},
+        {"missing": ["source"]},
+    ],
+)
+def test_continue_verdict_uses_strict_schema(mutation):
+    from discuss_agent.claims import ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims["X"] = _reviewed_claim()
+    verdict = {
+        "claim": "X",
+        "verdict": "CONTINUE",
+        "reason": "evidence gap",
+        "missing": "source",
+        "needs_agents": ["A"],
+        "allow_unknown_progress": False,
+        **mutation,
+    }
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr,
+        [verdict],
+        {"X"},
+        round_num=1,
+    )
+
+    assert accepted == []
+    assert rejected[0]["reason"] == "invalid continue verdict schema"
+    assert mgr.claims["X"].status == "OPEN"
+
+
 def test_applying_multiple_host_verdicts_persists_once():
     from discuss_agent.claims import Claim, ClaimsManager
     from discuss_agent.engine import DiscussionEngine
 
     mgr = ClaimsManager()
     mgr.claims = {
-        "X": Claim("X", "OPEN"),
-        "Y": Claim("Y", "OPEN"),
+        "X": _reviewed_claim(),
+        "Y": _reviewed_claim("Y"),
     }
     mgr.save = MagicMock()
 
     accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
         mgr,
         [
-            {"claim": "X", "verdict": "CLOSED:共识", "reason": "ok"},
-            {"claim": "Y", "verdict": "CLOSED:分歧", "reason": "recorded"},
+            _closed_verdict(),
+            _closed_verdict("Y", verdict="CLOSED:分歧"),
         ],
         {"X", "Y"},
         round_num=2,
@@ -336,6 +559,7 @@ def test_continue_verdict_requires_nonempty_targeted_evidence_request():
             "reason": "evidence gap",
             "missing": "",
             "needs_agents": ["A"],
+            "allow_unknown_progress": False,
         },
         {
             "claim": "Y",
@@ -343,6 +567,7 @@ def test_continue_verdict_requires_nonempty_targeted_evidence_request():
             "reason": "counterexample review",
             "missing": "review counterexample",
             "needs_agents": [],
+            "allow_unknown_progress": False,
         },
     ]
 
@@ -352,8 +577,8 @@ def test_continue_verdict_requires_nonempty_targeted_evidence_request():
 
     assert accepted == []
     assert [item["reason"] for item in rejected] == [
-        "missing field must be non-empty",
-        "needs_agents must be non-empty",
+        "invalid continue verdict schema",
+        "invalid continue verdict schema",
         "missing verdict",
         "missing verdict",
     ]
@@ -392,7 +617,7 @@ def test_continue_verdict_requires_explicit_boolean_unknown_policy(
     )
 
     assert accepted == []
-    assert rejected[0]["reason"] == "invalid allow_unknown_progress"
+    assert rejected[0]["reason"] == "invalid continue verdict schema"
     assert mgr.claims["X"].status == "OPEN"
 
 
@@ -432,22 +657,17 @@ def test_closed_verdict_rejects_unresolved_evidence_metadata(metadata):
     from discuss_agent.engine import DiscussionEngine
 
     mgr = ClaimsManager()
-    mgr.claims["X"] = Claim("X", "OPEN")
+    mgr.claims["X"] = _reviewed_claim()
 
     accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
         mgr,
-        [{
-            "claim": "X",
-            "verdict": "CLOSED:共识",
-            "reason": "supported",
-            **metadata,
-        }],
+        [_closed_verdict(**metadata)],
         {"X"},
         round_num=1,
     )
 
     assert accepted == []
-    assert rejected[0]["reason"] == "closed verdict has unresolved evidence"
+    assert rejected[0]["reason"] == "invalid closed verdict schema"
     assert mgr.claims["X"].status == "OPEN"
 
 
@@ -477,9 +697,16 @@ async def test_host_semantically_continues_new_claim_while_closing_sufficient_cl
         async def send(_prompt):
             counts[name] += 1
             if counts[name] == 1:
-                return "[NEW_CLAIM:old] old" if name == "A" else "[NEW_CLAIM:peer] peer"
+                return (
+                    "[NEW_CLAIM:old] source://old"
+                    if name == "A"
+                    else "[NEW_CLAIM:peer] source://peer"
+                )
             if name == "A":
-                return "[ACCEPT TO:peer] ok\n[NEW_CLAIM:new] genuinely new"
+                return (
+                    "[ACCEPT TO:peer] ok\n"
+                    "[NEW_CLAIM:new] source://new genuinely new"
+                )
             return "[ACCEPT TO:old] ok"
 
         conv.send = AsyncMock(side_effect=send)
@@ -505,14 +732,23 @@ async def test_host_semantically_continues_new_claim_while_closing_sufficient_cl
                 for keyword in candidates
             ]
         return [
-            {
-                "claim": keyword,
-                "verdict": "CONTINUE" if keyword == "new" else "CLOSED:共识",
-                "reason": "new evidence needs review" if keyword == "new" else "ok",
-                "missing": "B review" if keyword == "new" else "",
-                "needs_agents": ["B"] if keyword == "new" else [],
-                "allow_unknown_progress": False,
-            }
+            (
+                {
+                    "claim": keyword,
+                    "verdict": "CONTINUE",
+                    "reason": "new evidence needs review",
+                    "missing": "B review",
+                    "needs_agents": ["B"],
+                    "allow_unknown_progress": False,
+                }
+                if keyword == "new"
+                else _closed_verdict(
+                    keyword,
+                    proposer="A" if keyword == "old" else "B",
+                    reviewer="B" if keyword == "old" else "A",
+                    source=f"source://{keyword}",
+                )
+            )
             for keyword in candidates
         ]
 
@@ -551,9 +787,11 @@ async def test_host_can_close_same_round_claim_without_all_agents_responding(
         async def send(_prompt):
             counts[name] += 1
             if counts[name] == 1:
-                return "[NEW_CLAIM:old] old" if name == "A" else ""
+                return "[NEW_CLAIM:old] source://old" if name == "A" else ""
             if name == "A":
-                return "[NEW_CLAIM:new] same-round new"
+                return "[NEW_CLAIM:new] source://new same-round new"
+            if name == "B":
+                return "[ACCEPT TO:old] ok\n[ACCEPT TO:new] independently reviewed"
             return "[ACCEPT TO:old] ok"
 
         conv.send = AsyncMock(side_effect=send)
@@ -571,8 +809,12 @@ async def test_host_can_close_same_round_claim_without_all_agents_responding(
             "allow_unknown_progress": False,
         }],
         [
-            {"claim": "old", "verdict": "CLOSED:共识", "reason": "ok"},
-            {"claim": "new", "verdict": "CLOSED:共识", "reason": "sufficient"},
+            _closed_verdict("old", source="source://old"),
+            _closed_verdict(
+                "new",
+                source="source://new",
+                evidence_round=2,
+            ),
         ],
     ])
 
