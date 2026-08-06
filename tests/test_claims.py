@@ -124,6 +124,24 @@ class TestClaimsManagerMerge:
             AgentOutput("A", 1, "[REBUTTAL TO:不存在] 反驳"),
         ])
         assert len(mgr.claims) == 0
+        assert mgr.unmatched_responses == [{
+            "agent_name": "A",
+            "round_num": 1,
+            "response_type": "REBUTTAL",
+            "target": "不存在",
+        }]
+
+    def test_merge_batch_accept_targets_without_silent_loss(self):
+        mgr = ClaimsManager()
+        mgr.merge_round([
+            AgentOutput("A", 1, "[NEW_CLAIM:X] x"),
+            AgentOutput("B", 1, "[NEW_CLAIM:Y] y"),
+        ])
+        mgr.merge_round([AgentOutput("C", 2, "[ACCEPT TO:X、Y、Z] batch")])
+
+        assert mgr.claims["X"].entries[-1].entry_type == "ACCEPT"
+        assert mgr.claims["Y"].entries[-1].entry_type == "ACCEPT"
+        assert mgr.unmatched_responses[-1]["target"] == "Z"
 
     def test_current_round_updated(self):
         mgr = ClaimsManager()
@@ -148,6 +166,19 @@ class TestGetOpenClaims:
         open_claims = mgr.get_open_claims()
         keywords = {c.keyword for c in open_claims}
         assert keywords == {"X", "Z"}
+
+    def test_maturity_uses_cumulative_responses_per_claim(self):
+        mgr = ClaimsManager()
+        mgr.claims["old"] = Claim("old", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "claim"),
+            ClaimEntry("ACCEPT", "B", 2, "ok"),
+            ClaimEntry("ACCEPT", "C", 3, "ok"),
+        ])
+        mgr.claims["new"] = Claim("new", "OPEN", [
+            ClaimEntry("FROM", "B", 3, "claim"),
+        ])
+
+        assert [claim.keyword for claim in mgr.get_mature_claims({"A", "B", "C"})] == ["old"]
 
 
 # ---------------------------------------------------------------------------
@@ -311,3 +342,28 @@ class TestGenerateUpdatePrompt:
         mgr.current_round = 1
         prompt = mgr.generate_update_prompt(prev_round=0)
         assert "你的任务" in prompt
+
+    def test_per_agent_prompt_separates_needs_response_from_awaiting_host(self):
+        mgr = ClaimsManager()
+        mgr.current_round = 3
+        mgr.claims["mature"] = Claim("mature", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "mature body"),
+            ClaimEntry("ACCEPT", "B", 2, "ok"),
+            ClaimEntry("ACCEPT", "C", 2, "ok"),
+        ])
+        mgr.claims["needs-c"] = Claim("needs-c", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "needs body"),
+            ClaimEntry("ACCEPT", "B", 2, "ok"),
+        ])
+
+        prompt = mgr.generate_update_prompt(
+            prev_round=2,
+            agent_name="C",
+            all_agent_names={"A", "B", "C"},
+        )
+
+        assert "## NEEDS_YOUR_RESPONSE" in prompt
+        assert "CLAIM:needs-c" in prompt
+        assert "## AWAITING_HOST" in prompt
+        assert "CLAIM:mature" in prompt
+        assert "mature body" not in prompt

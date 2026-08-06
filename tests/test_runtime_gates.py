@@ -96,6 +96,79 @@ async def test_natural_convergence_ignores_legacy_min_rounds(
     assert engine._host_judge.await_args.args[1] == 2
 
 
+def test_host_precondition_is_claim_local_and_cumulative():
+    from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    config = _config(max_rounds=4)
+    config.agents.append(AgentConfig(name="C", system_prompt="C"))
+    mgr = ClaimsManager()
+    mgr.claims["mature"] = Claim("mature", "OPEN", [
+        ClaimEntry("FROM", "A", 1, "claim"),
+        ClaimEntry("ACCEPT", "B", 2, "ok"),
+        ClaimEntry("ACCEPT", "C", 3, "ok"),
+    ])
+    mgr.claims["new"] = Claim("new", "OPEN", [
+        ClaimEntry("FROM", "B", 3, "claim"),
+    ])
+
+    assert DiscussionEngine(config)._check_convergence_precondition(mgr, round_num=3) is True
+
+
+@patch("discuss_agent.engine.generate_usage_summary")
+@patch("discuss_agent.engine.AuditLogger")
+@patch("discuss_agent.engine.Archiver")
+@patch("discuss_agent.engine.ContextManager")
+@patch("discuss_agent.engine.AgentConversation")
+async def test_host_partially_closes_mature_claim_while_new_claim_remains_open(
+    MockConversation, MockContext, MockArchiver, MockAudit, _summary,
+):
+    from discuss_agent.engine import DiscussionEngine
+
+    config = _config(max_rounds=2)
+    config.host.skip_summary = True
+    archiver = MagicMock()
+    archiver.start_session.return_value = "/tmp/runtime-partial-closure"
+    MockArchiver.return_value = archiver
+    MockAudit.return_value = MagicMock()
+    MockContext.return_value.build_initial_context = AsyncMock(return_value="topic")
+    counts = {"A": 0, "B": 0}
+
+    def conversation(**kwargs):
+        name = kwargs["agent_name"]
+        conv = MagicMock(messages=[])
+
+        async def send(_prompt):
+            counts[name] += 1
+            if counts[name] == 1:
+                return "[NEW_CLAIM:old] old" if name == "A" else "[NEW_CLAIM:peer] peer"
+            if name == "A":
+                return "[ACCEPT TO:peer] ok\n[NEW_CLAIM:new] genuinely new"
+            return "[ACCEPT TO:old] ok"
+
+        conv.send = AsyncMock(side_effect=send)
+        return conv
+
+    MockConversation.side_effect = conversation
+    engine = DiscussionEngine(config)
+    judged = []
+
+    async def judge(mgr, _round):
+        mature = [claim.keyword for claim in mgr.get_mature_claims({"A", "B"})]
+        judged.extend(mature)
+        return [
+            {"claim": keyword, "verdict": "CLOSED:共识", "reason": "ok"}
+            for keyword in mature
+        ]
+
+    engine._host_judge = AsyncMock(side_effect=judge)
+    result = await engine.run()
+
+    assert set(judged) == {"old", "peer"}
+    assert result.converged is False
+    assert result.remaining_disputes == ["new"]
+
+
 @pytest.mark.parametrize("strict", [True, False])
 def test_strict_tool_loading_controls_fail_closed(strict):
     from discuss_agent.engine import DiscussionEngine

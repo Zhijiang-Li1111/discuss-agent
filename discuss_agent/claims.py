@@ -118,6 +118,26 @@ class ClaimsManager:
         self.claims: dict[str, Claim] = {}
         self.topic: str = ""
         self.current_round: int = 0
+        self.unmatched_responses: list[dict[str, object]] = []
+
+    @staticmethod
+    def _resolve_response_targets(target: str, known_targets: set[str]) -> tuple[list[str], list[str]]:
+        """Resolve one response marker to exact claim keywords.
+
+        Exact matches win so punctuation inside a legitimate keyword is kept.
+        Otherwise split the separators agents commonly use for compact targets.
+        Unresolved targets are returned for an audit trail instead of vanishing.
+        """
+        normalized = target.strip()
+        if normalized in known_targets:
+            return [normalized], []
+        parts = [part.strip() for part in re.split(r"[、,，;；]", normalized) if part.strip()]
+        if len(parts) <= 1:
+            return [], [normalized]
+        return (
+            [part for part in parts if part in known_targets],
+            [part for part in parts if part not in known_targets],
+        )
 
     def parse_claims_file(self) -> None:
         """Parse an existing claims.md file into memory."""
@@ -218,22 +238,24 @@ class ClaimsManager:
                         content=response.content,
                     ))
                     self.claims[response.target] = claim
-                elif response.response_type == "REBUTTAL":
-                    if response.target in self.claims:
-                        self.claims[response.target].add_entry(ClaimEntry(
-                            entry_type="REBUTTAL",
+                elif response.response_type in {"REBUTTAL", "ACCEPT"}:
+                    targets, unmatched = self._resolve_response_targets(
+                        response.target, set(self.claims),
+                    )
+                    for target in targets:
+                        self.claims[target].add_entry(ClaimEntry(
+                            entry_type=response.response_type,
                             agent_name=output.agent_name,
                             round_num=output.round_num,
                             content=response.content,
                         ))
-                elif response.response_type == "ACCEPT":
-                    if response.target in self.claims:
-                        self.claims[response.target].add_entry(ClaimEntry(
-                            entry_type="ACCEPT",
-                            agent_name=output.agent_name,
-                            round_num=output.round_num,
-                            content=response.content,
-                        ))
+                    for target in unmatched:
+                        self.unmatched_responses.append({
+                            "agent_name": output.agent_name,
+                            "round_num": output.round_num,
+                            "response_type": response.response_type,
+                            "target": target,
+                        })
         self.current_round = max(
             (o.round_num for o in agent_outputs), default=self.current_round
         )
@@ -242,6 +264,29 @@ class ClaimsManager:
     def get_open_claims(self) -> list[Claim]:
         """Return all claims with OPEN status."""
         return [c for c in self.claims.values() if c.status == "OPEN"]
+
+    @staticmethod
+    def proposer_for(claim: Claim) -> str | None:
+        """Return the original proposer for *claim*, if present."""
+        return next(
+            (entry.agent_name for entry in claim.entries if entry.entry_type == "FROM"),
+            None,
+        )
+
+    def get_mature_claims(self, all_agent_names: set[str]) -> list[Claim]:
+        """Return OPEN claims every expected peer has answered at least once."""
+        mature: list[Claim] = []
+        for claim in self.get_open_claims():
+            proposer = self.proposer_for(claim)
+            expected = all_agent_names - {proposer} if proposer else all_agent_names
+            responding = {
+                entry.agent_name
+                for entry in claim.entries
+                if entry.entry_type in {"ACCEPT", "REBUTTAL", "RESPONSE"}
+            }
+            if expected.issubset(responding):
+                mature.append(claim)
+        return mature
 
     def close_claim(self, keyword: str, verdict: str, reason: str, round_num: int) -> None:
         """Host closes a claim with a verdict."""
@@ -257,14 +302,26 @@ class ClaimsManager:
         ))
         self.save()
 
-    def generate_update_prompt(self, prev_round: int) -> str:
+    def generate_update_prompt(
+        self,
+        prev_round: int,
+        *,
+        agent_name: str | None = None,
+        all_agent_names: set[str] | None = None,
+    ) -> str:
         """Generate incremental update prompt for agents.
 
         - OPEN claims: full content included (with FROM tags)
         - CLOSED/new claims since prev_round: only status change notification
         """
         status_changes: list[str] = []
-        open_claims_text: list[str] = []
+        needs_response_text: list[str] = []
+        awaiting_host: list[str] = []
+        mature_keywords = (
+            {claim.keyword for claim in self.get_mature_claims(all_agent_names)}
+            if all_agent_names
+            else set()
+        )
 
         for claim in self.claims.values():
             # Check if status changed since prev_round
@@ -278,7 +335,24 @@ class ClaimsManager:
             ) and claim.status == "OPEN"
 
             if claim.status == "OPEN":
-                open_claims_text.append(claim.format())
+                proposer = self.proposer_for(claim)
+                has_responded = agent_name is not None and any(
+                    entry.agent_name == agent_name
+                    and entry.entry_type in {"ACCEPT", "REBUTTAL", "RESPONSE"}
+                    for entry in claim.entries
+                )
+                if agent_name is None:
+                    needs_response_text.append(claim.format())
+                elif claim.keyword in mature_keywords:
+                    awaiting_host.append(f"- CLAIM:{claim.keyword}")
+                elif agent_name == proposer and not any(
+                    entry.entry_type == "REBUTTAL" for entry in claim.entries
+                ):
+                    awaiting_host.append(f"- CLAIM:{claim.keyword}（你提出；暂无反驳）")
+                elif has_responded:
+                    awaiting_host.append(f"- CLAIM:{claim.keyword}（你已回应）")
+                else:
+                    needs_response_text.append(claim.format())
                 if has_recent_new and len(claim.entries) == 1:
                     status_changes.append(f"- [新增] CLAIM:{claim.keyword}")
             elif has_recent_host:
@@ -292,16 +366,29 @@ class ClaimsManager:
             parts.append("\n状态变化：")
             parts.extend(status_changes)
 
-        if open_claims_text:
-            parts.append("\n以下是当前所有 OPEN claims 的完整讨论内容：\n")
-            parts.extend(open_claims_text)
+        if needs_response_text:
+            parts.append("\n## NEEDS_YOUR_RESPONSE\n")
+            parts.extend(needs_response_text)
+        if awaiting_host:
+            parts.append("\n## AWAITING_HOST（无需重复回应）")
+            parts.extend(awaiting_host)
+
+        recent_unmatched = [
+            item for item in self.unmatched_responses
+            if int(item["round_num"]) > prev_round
+            and (agent_name is None or item["agent_name"] == agent_name)
+        ]
+        if recent_unmatched:
+            parts.append("\n## 上轮未匹配的target（请改用单个精确关键词）")
+            parts.extend(f"- {item['target']}" for item in recent_unmatched)
 
         parts.append(
             "\n## 你的任务\n"
-            "对每个 OPEN claim，你必须回应（除非你是提出者且没人反驳）：\n"
+            "只回应 NEEDS_YOUR_RESPONSE；AWAITING_HOST 不要重复回应。\n"
             "- [REBUTTAL TO:关键词] 反驳 + 证据\n"
             "- [ACCEPT TO:关键词] 接受 + 理由\n"
-            "- [NEW_CLAIM:关键词] 提出新论点\n"
+            "- 每个 ACCEPT/REBUTTAL marker 只能写一个精确关键词，不得批量列出。\n"
+            "- [NEW_CLAIM:关键词] 仅限新证据、新反证或新的实质UNKNOWN；不要为状态改名另开claim。\n"
             "可以随时用 research_search 或 web_search 搜索证据。"
         )
 

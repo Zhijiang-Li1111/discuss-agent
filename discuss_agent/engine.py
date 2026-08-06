@@ -248,12 +248,16 @@ class DiscussionEngine:
     ) -> list[AgentOutput]:
         """Round N: push incremental update and collect responses."""
         logger.info("=== Round %d: Incremental update ===", round_num)
-        prompt = claims_mgr.generate_update_prompt(prev_round)
         for conv in self._conversations.values():
             if hasattr(conv, "set_round"):
                 conv.set_round(round_num)
 
         async def call_one(name: str) -> AgentOutput | None:
+            prompt = claims_mgr.generate_update_prompt(
+                prev_round,
+                agent_name=name,
+                all_agent_names={ac.name for ac in self._config.agents},
+            )
             text = await self._call_agent(name, prompt)
             if text:
                 return AgentOutput(agent_name=name, round_num=round_num, raw_text=text)
@@ -270,26 +274,9 @@ class DiscussionEngine:
     def _check_convergence_precondition(
         self, claims_mgr: ClaimsManager, round_num: int,
     ) -> bool:
-        """Check if all OPEN claims have been responded to by all agents."""
-        open_claims = claims_mgr.get_open_claims()
+        """Return whether at least one OPEN claim is mature for Host judgment."""
         all_agent_names = {ac.name for ac in self._config.agents}
-
-        for claim in open_claims:
-            responding_agents = {
-                e.agent_name
-                for e in claim.entries
-                if e.round_num == round_num and e.entry_type != "FROM"
-            }
-            # The original proposer doesn't need to respond to their own claim
-            proposer = None
-            for e in claim.entries:
-                if e.entry_type == "FROM":
-                    proposer = e.agent_name
-                    break
-            expected = all_agent_names - {proposer} if proposer else all_agent_names
-            if not expected.issubset(responding_agents | {proposer}):
-                return False
-        return True
+        return bool(claims_mgr.get_mature_claims(all_agent_names))
 
     def _create_host_client(self):
         """Create a host client using the configured model's wire protocol."""
@@ -362,15 +349,17 @@ class DiscussionEngine:
         return result
 
     async def _host_judge(self, claims_mgr: ClaimsManager, round_num: int) -> list[dict]:
-        """Host LLM judges each OPEN claim."""
+        """Host LLM judges each mature OPEN claim."""
         logger.info("=== HOST JUDGE (Round %d) ===", round_num)
-        open_claims = claims_mgr.get_open_claims()
-        if not open_claims:
+        mature_claims = claims_mgr.get_mature_claims(
+            {ac.name for ac in self._config.agents},
+        )
+        if not mature_claims:
             return []
 
-        claims_text = "\n\n".join(c.format() for c in open_claims)
+        claims_text = "\n\n".join(c.format() for c in mature_claims)
         prompt = (
-            f"以下是当前所有 OPEN claims 的讨论记录：\n\n{claims_text}\n\n"
+            f"以下是已完成各方回应、等待裁决的成熟 claims：\n\n{claims_text}\n\n"
             f"请对每个 claim 裁决：\n"
             f"- CLOSED:共识 — 各方达成一致\n"
             f"- CLOSED:分歧 — 讨论充分但立场不同，记录分歧\n"
