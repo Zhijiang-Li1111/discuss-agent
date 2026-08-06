@@ -38,7 +38,7 @@ Generic multi-agent adversarial discussion framework.
 │  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ Round Loop ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐   │
 │                                                                         │  │
 │  │  ┌────────────────────────────────────────────────────────────┐   │  │
-│     │  1. EXPRESS — all agents speak in parallel                  │      │
+│     │  1. EXPRESS — agents independently decide relevant input    │      │
 │  │  │                                                            │   │  │
 │     │   ┌───────────┐  ┌───────────┐       ┌───────────┐        │      │
 │  │  │   │  Agent A  │  │  Agent B  │  ...  │  Agent N  │        │   │  │
@@ -47,7 +47,7 @@ Generic multi-agent adversarial discussion framework.
 │     └────────────────────────────┬───────────────────────────────┘      │
 │  │                               ▼                                  │  │
 │     ┌────────────────────────────────────────────────────────────┐      │
-│  │  │  2. CHALLENGE — each agent critiques others (parallel)     │  │  │
+│  │  │  2. CHALLENGE — relevant agents add evidence/rebuttals     │  │  │
 │     │                                                            │      │
 │  │  │   Agent A reviews B,C  │  Agent B reviews A,C  │  ...     │  │  │
 │     └────────────────────────────┬───────────────────────────────┘      │
@@ -55,14 +55,14 @@ Generic multi-agent adversarial discussion framework.
 │     ┌────────────────────────────────────────────────────────────┐      │
 │  │  │  3. HOST JUDGE — convergence check                         │  │  │
 │     │                                                            │      │
-│  │  │   ┌────────────┐    {"converged": bool,                    │  │  │
-│     │   │    Host     │     "reason": "...",                     │      │
-│  │  │   │   Agent    │     "remaining_disputes": [...]}          │  │  │
+│  │  │   ┌────────────┐    [{"claim": "...",                      │  │  │
+│     │   │    Host     │      "verdict": "CLOSED:*|CONTINUE",     │      │
+│  │  │   │   Agent    │      "reason": "...", ...}]               │  │  │
 │     │   └────────────┘                                           │      │
 │  │  └──────────┬──────────────────────────┬──────────────────────┘  │  │
 │                │                          │                            │
-│  │     converged &&              not converged &&                    │  │
-│        round >= min_rounds       round < max_rounds                    │
+│  │     Host closes all           OPEN claims &&                       │  │
+│        OPEN claims               round < max_rounds safety cap         │
 │  │             │                          │                         │  │
 │                ▼                          └──────── loop back ──┐       │
 │  └ ─ ─ ─ ─ ─ ─│─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ┘  │
@@ -88,6 +88,11 @@ Generic multi-agent adversarial discussion framework.
           │  summary.md    (if converged)│
           └──────────────────────────────┘
 ```
+
+Bounded prompts prevent large legacy sessions from being mistaken for convergence.
+In the measured Muyuan replay, all 71 claims remained OPEN and all 71 remained
+Host candidates; the Host batch was 37,053 characters and each agent prompt was
+37,007 characters. This is bounded review state, not natural convergence.
 
 ## Install
 
@@ -133,8 +138,9 @@ host:
   # model: "claude-haiku-4-5-20251001" # optional — use a cheaper model for the host
   # temperature: 0.3                    # optional — override per-field
   convergence_prompt: |
-    You are the discussion moderator. Judge whether the discussion has converged.
-    Return JSON: {"converged": bool, "reason": "...", "remaining_disputes": [...]}
+    You are the discussion moderator. Semantically judge each OPEN claim from
+    its evidence, rebuttals, and UNKNOWNs. Do not require fixed response counts.
+    Return one verdict per claim: CLOSED:共识, CLOSED:分歧, or CONTINUE.
   summary_prompt: |
     Summarize the discussion. Include key agreements, remaining disagreements,
     and a balanced conclusion.
@@ -174,8 +180,8 @@ python3 -m discuss_agent config.yaml --resume discussions/2026-04-11_2159 --roun
 | `discussion` | `base_url` | No | — | Custom API endpoint / proxy URL |
 | `discussion` | `temperature` | No | SDK default | Sampling temperature |
 | `discussion` | `max_tokens` | No | SDK default | Maximum output tokens |
-| `discussion` | `min_rounds` | No | 2 | Minimum rounds before convergence allowed |
-| `discussion` | `max_rounds` | No | 5 | Maximum rounds before forced exit |
+| `discussion` | `min_rounds` | No | 2 | Legacy compatibility field; does not gate convergence |
+| `discussion` | `max_rounds` | No | 6 | Safety cap on rounds, not a convergence requirement |
 | `tools` | `path` | Yes | — | Python dotted path to a Toolkit subclass |
 | `context_builder` | — | No | — | Python dotted path to an async context builder function |
 | `limitation` | — | No | — | Restrict discussion scope; injected as a warning prefix in every round |

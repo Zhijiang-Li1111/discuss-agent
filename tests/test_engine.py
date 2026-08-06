@@ -117,7 +117,21 @@ class TestDiscussionEngineIntegration:
         ]
 
         mock_client = MagicMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_host_response)
+        round_one_response = MagicMock()
+        round_one_response.content = [
+            MagicMock(
+                type="text",
+                text=(
+                    '[{"claim":"能繁去化","verdict":"CONTINUE","reason":"需交叉核查",'
+                    '"missing":"成本方审阅","needs_agents":["Agent-B"]},'
+                    '{"claim":"成本优势","verdict":"CONTINUE","reason":"需交叉核查",'
+                    '"missing":"供给方审阅","needs_agents":["Agent-A"]}]'
+                ),
+            )
+        ]
+        mock_client.messages.create = AsyncMock(
+            side_effect=[round_one_response, mock_host_response],
+        )
         mock_anthropic_mod.AsyncAnthropic.return_value = mock_client
 
         # --- Run engine ---
@@ -236,6 +250,10 @@ class TestOpenAIHostRouting:
         claim.format.return_value = "## [OPEN] cost"
         claims_mgr = MagicMock()
         claims_mgr.get_open_claims.return_value = [claim]
+        claims_mgr.get_host_candidates.return_value = [claim]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:cost [OPEN]##",
+        ]
         claims_mgr.format_file.return_value = "all claims"
 
         engine = DiscussionEngine(config)
@@ -252,3 +270,227 @@ class TestOpenAIHostRouting:
         summary_messages = client.chat.completions.create.await_args_list[1].kwargs["messages"]
         assert judge_messages[0] == {"role": "system", "content": "Judge convergence."}
         assert summary_messages[0] == {"role": "system", "content": "Summarize."}
+
+    async def test_host_judge_reviews_and_combines_every_bounded_batch(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock(), MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+            "##CLAIM:second [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = (
+            "GLOBAL: first depends on second"
+        )
+        engine._call_host = AsyncMock(side_effect=[
+            '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"}]',
+            '[{"claim":"second","verdict":"CONTINUE","reason":"gap",'
+            '"missing":"source","needs_agents":["Agent-B"]}]',
+        ])
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=2)
+
+        assert [item["claim"] for item in verdicts] == ["first", "second"]
+        assert engine._call_host.await_count == 2
+        prompts = [call.args[1] for call in engine._call_host.await_args_list]
+        assert "候选批次：1/2" in prompts[0]
+        assert "候选批次：2/2" in prompts[1]
+        assert all("GLOBAL: first depends on second" in prompt for prompt in prompts)
+
+    async def test_host_judge_retries_valid_but_incomplete_batch(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock(), MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##\n##CLAIM:second [OPEN]##",
+        ]
+        engine._call_host = AsyncMock(side_effect=[
+            '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"}]',
+            (
+                '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"},'
+                '{"claim":"second","verdict":"CONTINUE","reason":"gap",'
+                '"missing":"source","needs_agents":["Agent-B"]}]'
+            ),
+        ])
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=2)
+
+        assert [item["claim"] for item in verdicts] == ["first", "second"]
+        assert engine._call_host.await_count == 2
+
+    async def test_host_judge_retries_duplicate_conflicting_verdicts(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        engine._call_host = AsyncMock(side_effect=[
+            (
+                '[{"claim":"first","verdict":"CLOSED:共识","reason":"yes"},'
+                '{"claim":"first","verdict":"CONTINUE","reason":"no"}]'
+            ),
+            '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"}]',
+        ])
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts == [{
+            "claim": "first",
+            "verdict": "CLOSED:共识",
+            "reason": "enough",
+        }]
+        assert engine._call_host.await_count == 2
+        assert [
+            item["reason"] for item in engine._host_protocol_rejections
+        ] == ["duplicate verdict"]
+
+    async def test_host_judge_audits_extra_and_missing_ids_before_retry(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock(), MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##\n##CLAIM:second [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(side_effect=[
+            (
+                '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"},'
+                '{"claim":"extra","verdict":"CLOSED:共识","reason":"other"}]'
+            ),
+            (
+                '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"},'
+                '{"claim":"second","verdict":"CLOSED:共识","reason":"enough"}]'
+            ),
+        ])
+
+        await engine._host_judge(claims_mgr, round_num=1)
+
+        assert {
+            (item["claim"], item["reason"])
+            for item in engine._host_protocol_rejections
+        } == {
+            ("extra", "claim was not offered to the host"),
+            ("second", "missing verdict"),
+        }
+
+    async def test_host_judge_preserves_bracketed_claim_keyword(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:EPS [FY26] [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(return_value=(
+            '[{"claim":"EPS [FY26]","verdict":"CLOSED:共识",'
+            '"reason":"enough"}]'
+        ))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts[0]["claim"] == "EPS [FY26]"
+        assert engine._call_host.await_count == 1
+        assert engine._host_protocol_rejections == []
+
+    async def test_host_summary_prompt_is_bounded(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.format_file.return_value = "history" * 100_000
+        engine._call_host = AsyncMock(return_value="summary")
+
+        await engine._host_summarize(claims_mgr, round_num=2)
+
+        prompt = engine._call_host.await_args.args[1]
+        assert len(prompt) < 110_000
+        assert "截断" in prompt
+
+    async def test_round_one_host_prompt_fail_closes_unsupported_claims(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        engine._call_host = AsyncMock(return_value=(
+            '[{"claim":"first","verdict":"CONTINUE","reason":"gap",'
+            '"missing":"source","needs_agents":["Agent-B"]}]'
+        ))
+
+        await engine._host_judge(claims_mgr, round_num=1)
+
+        prompt = engine._call_host.await_args.args[1]
+        assert "第1轮也必须遵守" in prompt
+        assert "证据不足" in prompt
+        assert "关键反驳被忽略" in prompt
+        assert "UNKNOWN" in prompt
+        assert "实质缺口时，必须 CONTINUE" in prompt
+        assert "上下文截断" in prompt
+        assert "必须 CONTINUE" in prompt
+        assert "定向给相关 Agent" in prompt
+
+    async def test_host_judge_accepts_bracketed_claim_keyword(self):
+        from discuss_agent.claims import Claim, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = ClaimsManager()
+        claims_mgr.claims["EPS [FY26]"] = Claim("EPS [FY26]", "OPEN")
+        engine._call_host = AsyncMock(return_value=(
+            '[{"claim":"EPS [FY26]","verdict":"CLOSED:共识",'
+            '"reason":"supported"}]'
+        ))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts == [{
+            "claim": "EPS [FY26]",
+            "verdict": "CLOSED:共识",
+            "reason": "supported",
+        }]
+
+    async def test_final_round_prompt_requests_semantic_terminal_judgment(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2, max_rounds=3))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = "global context"
+        engine._call_host = AsyncMock(return_value=(
+            '[{"claim":"first","verdict":"CONTINUE","reason":"source unavailable",'
+            '"missing":"decisive source","needs_agents":["Agent-B"]}]'
+        ))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=3)
+
+        prompt = engine._call_host.await_args.args[1]
+        assert verdicts[0]["verdict"] == "CONTINUE"
+        assert "安全上限" in prompt
+        assert "最终语义裁决" in prompt
+        assert "保持 OPEN" in prompt
+        assert "不得因回应数量" in prompt
+        assert "UNKNOWN是否会改变结论" in prompt

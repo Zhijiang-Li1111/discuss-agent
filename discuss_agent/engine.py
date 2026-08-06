@@ -43,6 +43,7 @@ class DiscussionEngine:
         self._config = config
         self._archiver = Archiver()
         self._audit: AuditLogger | None = None
+        self._host_protocol_rejections: list[dict] = []
 
         # Load context builder
         context_builder = None
@@ -256,7 +257,6 @@ class DiscussionEngine:
             prompt = claims_mgr.generate_update_prompt(
                 prev_round,
                 agent_name=name,
-                all_agent_names={ac.name for ac in self._config.agents},
             )
             text = await self._call_agent(name, prompt)
             if text:
@@ -268,15 +268,18 @@ class DiscussionEngine:
         )
         outputs = [r for r in results if r is not None]
         if not outputs:
-            raise RuntimeError(f"All agents failed in Round {round_num}")
+            logger.warning(
+                "No agent produced an update in Round %d; Host will review "
+                "the persisted OPEN claims.",
+                round_num,
+            )
         return outputs
 
     def _check_convergence_precondition(
         self, claims_mgr: ClaimsManager, round_num: int,
     ) -> bool:
-        """Return whether at least one OPEN claim is mature for Host judgment."""
-        all_agent_names = {ac.name for ac in self._config.agents}
-        return bool(claims_mgr.get_mature_claims(all_agent_names))
+        """Return whether the Host has any OPEN claim to review."""
+        return bool(claims_mgr.get_host_candidates())
 
     def _create_host_client(self):
         """Create a host client using the configured model's wire protocol."""
@@ -349,42 +352,134 @@ class DiscussionEngine:
         return result
 
     async def _host_judge(self, claims_mgr: ClaimsManager, round_num: int) -> list[dict]:
-        """Host LLM judges each mature OPEN claim."""
+        """Ask the Host to semantically judge every OPEN claim."""
         logger.info("=== HOST JUDGE (Round %d) ===", round_num)
-        mature_claims = claims_mgr.get_mature_claims(
-            {ac.name for ac in self._config.agents},
-        )
-        if not mature_claims:
+        self._host_protocol_rejections = []
+        candidates = claims_mgr.get_host_candidates()
+        if not candidates:
             return []
 
-        claims_text = "\n\n".join(c.format() for c in mature_claims)
-        prompt = (
-            f"以下是已完成各方回应、等待裁决的成熟 claims：\n\n{claims_text}\n\n"
-            f"请对每个 claim 裁决：\n"
-            f"- CLOSED:共识 — 各方达成一致\n"
-            f"- CLOSED:分歧 — 讨论充分但立场不同，记录分歧\n"
-            f"- CONTINUE — 仍需讨论\n\n"
-            f'输出 JSON 数组: [{{"claim": "关键词", "verdict": "CLOSED:共识", "reason": "..."}}]'
+        host_max_tokens = self._host_model_config.max_tokens or 4096
+        claim_batches = claims_mgr.format_host_candidate_batches(
+            max_claims=max(1, host_max_tokens // 100),
         )
-        for attempt in range(2):
-            try:
-                text = await self._call_host(
-                    self._config.host.convergence_prompt, prompt,
-                    round_num=round_num,
-                )
-                match = re.search(r"\[.*\]", text, re.DOTALL)
-                if match:
-                    return json.loads(match.group())
-            except Exception:
-                if attempt == 0:
-                    continue
-        return []
+        global_context = claims_mgr.format_host_global_context()
+        agent_names = [ac.name for ac in self._config.agents]
+        final_round = round_num == self._config.max_rounds
+        final_instruction = ""
+        if final_round:
+            final_instruction = (
+                "本轮是 max_rounds 安全上限，不是最低讨论轮数或数量门。"
+                "请做最终语义裁决：能关闭则关闭，真实冲突用 CLOSED:分歧 忠实保留；"
+                "仍缺决定性信息则用 CONTINUE 并保持 OPEN。"
+                "不得因回应数量、报告数量或字段数量自动判定成功或失败。\n"
+            )
+        verdicts: list[dict] = []
+        for batch_index, claims_text in enumerate(claim_batches, start=1):
+            expected_keywords = ClaimsManager.claim_keywords_from_formatted(
+                claims_text,
+            )
+            prompt = (
+                "讨论目标/议题："
+                f"{ClaimsManager._truncate(claims_mgr.topic or '未提供明确议题', 4_000)}\n"
+                f"候选批次：{batch_index}/{len(claim_batches)}\n\n"
+                "以下是本轮 OPEN claims。它们都是候选，不代表已经成熟：\n\n"
+                f"{claims_text}\n\n"
+                "## 跨批次全局摘要\n\n"
+                f"{global_context}\n\n"
+                "请逐项基于目标、claims、证据、反驳和 UNKNOWN 做语义裁决。"
+                "不得以固定轮数、回应数量或全员回应作为准出门槛，也不得把无人反驳当作共识。\n"
+                f"第{round_num}轮也必须遵守以下证据和失败标准，不得因轮次提前关闭。\n"
+                "逐项判断：核心要求是否被实质满足；关键反驳是否得到处理；"
+                "UNKNOWN是否会改变结论还是只降低置信度；证据冲突是否被忠实保留；"
+                "继续讨论是否可能获得会改变判断的新信息。\n"
+                "- CLOSED:共识：证据标准已满足，关键反例已处理，结论边界清楚。\n"
+                "- CLOSED:分歧：关键证据和反驳已充分呈现，但立场仍不同；明确记录分歧。\n"
+                "- CONTINUE：证据不足、关键角色未审阅、反例未处理或边界不清；"
+                "说明非空缺口，定向给相关 Agent（至少一个），"
+                "并明确是否允许带 UNKNOWN 推进。"
+                "这些是语义路由提示，不是代码计数门槛。\n"
+                "UNKNOWN 会改变结论或是实质缺口时，必须 CONTINUE；"
+                "只有不影响结论边界时才可降低置信度后关闭。\n"
+                "失败条件：证据无法追溯、关键反驳被忽略、UNKNOWN 被伪装成事实、"
+                "或上下文截断导致无法判断时，必须 CONTINUE，不得假收敛。\n"
+                f"{final_instruction}"
+                f"可定向的 Agent：{json.dumps(agent_names, ensure_ascii=False)}\n"
+                "本批每个 claim 必须且只能输出一次。输出 JSON 数组，不要输出其他文字：\n"
+                '[{"claim":"关键词","verdict":"CLOSED:共识|CLOSED:分歧|CONTINUE",'
+                '"reason":"基于证据的理由","missing":"CONTINUE时缺什么，否则空字符串",'
+                '"needs_agents":["CONTINUE时至少一个需要回应的Agent名称"],'
+                '"allow_unknown_progress":false}]'
+            )
+            for attempt in range(2):
+                try:
+                    text = await self._call_host(
+                        self._config.host.convergence_prompt,
+                        prompt,
+                        round_num=round_num,
+                    )
+                    match = re.search(r"\[.*\]", text, re.DOTALL)
+                    if match:
+                        parsed = json.loads(match.group())
+                        if isinstance(parsed, list):
+                            returned_claims = [
+                                item.get("claim")
+                                for item in parsed
+                                if isinstance(item, dict)
+                                and isinstance(item.get("claim"), str)
+                            ]
+                            if (
+                                len(returned_claims) == len(parsed)
+                                and len(returned_claims) == len(expected_keywords)
+                                and set(returned_claims) == expected_keywords
+                            ):
+                                verdicts.extend(parsed)
+                                break
+                            self._record_host_protocol_rejections(
+                                parsed, expected_keywords,
+                            )
+                except Exception:
+                    if attempt == 0:
+                        continue
+        return verdicts
+
+    def _record_host_protocol_rejections(
+        self, verdicts: list, expected_keywords: set[str],
+    ) -> None:
+        """Audit missing, extra, and duplicate IDs from a rejected Host batch."""
+        seen: set[str] = set()
+        returned: set[str] = set()
+        for item in verdicts:
+            if not isinstance(item, dict) or not isinstance(item.get("claim"), str):
+                continue
+            keyword = item["claim"]
+            if keyword in seen:
+                self._host_protocol_rejections.append({
+                    **item,
+                    "host_reason": item.get("reason", ""),
+                    "reason": "duplicate verdict",
+                })
+            elif keyword not in expected_keywords:
+                self._host_protocol_rejections.append({
+                    **item,
+                    "host_reason": item.get("reason", ""),
+                    "reason": "claim was not offered to the host",
+                })
+            seen.add(keyword)
+            returned.add(keyword)
+        for keyword in sorted(expected_keywords - returned):
+            self._host_protocol_rejections.append({
+                "claim": keyword,
+                "verdict": None,
+                "host_reason": "",
+                "reason": "missing verdict",
+            })
 
     def _apply_host_verdicts(
         self,
         claims_mgr: ClaimsManager,
         verdicts: list[dict],
-        mature_keywords: set[str],
+        offered_keywords: set[str],
         round_num: int,
     ) -> tuple[list[dict], list[dict]]:
         """Apply only one valid verdict for each claim offered to the Host."""
@@ -397,6 +492,7 @@ class DiscussionEngine:
             verdict = item if isinstance(item, dict) else {}
             keyword = verdict.get("claim", "")
             decision = verdict.get("verdict", "")
+            reason = verdict.get("reason", "")
             rejection_reason = ""
             if not isinstance(keyword, str):
                 rejection_reason = "invalid claim field"
@@ -404,10 +500,36 @@ class DiscussionEngine:
                 rejection_reason = "invalid verdict field"
             elif keyword in seen:
                 rejection_reason = "duplicate verdict"
-            elif keyword not in mature_keywords:
-                rejection_reason = "claim was not in the mature set"
+            elif keyword not in offered_keywords:
+                rejection_reason = "claim was not offered to the host"
+            elif (
+                keyword not in claims_mgr.claims
+                or claims_mgr.claims[keyword].status != "OPEN"
+            ):
+                rejection_reason = "claim is not open"
             elif decision not in valid_verdicts:
                 rejection_reason = "invalid verdict"
+            elif not isinstance(reason, str) or not reason.strip():
+                rejection_reason = "reason must be a non-empty string"
+            elif decision == "CONTINUE":
+                needs_agents = verdict.get("needs_agents", [])
+                missing = verdict.get("missing", "")
+                allow_unknown = verdict.get("allow_unknown_progress")
+                known_agents = {ac.name for ac in self._config.agents}
+                if (
+                    not isinstance(needs_agents, list)
+                    or not all(isinstance(name, str) for name in needs_agents)
+                    or any(name not in known_agents for name in needs_agents)
+                ):
+                    rejection_reason = "invalid needs_agents"
+                elif not isinstance(missing, str):
+                    rejection_reason = "invalid missing field"
+                elif not missing.strip():
+                    rejection_reason = "missing field must be non-empty"
+                elif not needs_agents:
+                    rejection_reason = "needs_agents must be non-empty"
+                elif not isinstance(allow_unknown, bool):
+                    rejection_reason = "invalid allow_unknown_progress"
 
             if rejection_reason:
                 rejected.append({
@@ -418,23 +540,50 @@ class DiscussionEngine:
                 continue
 
             seen.add(keyword)
-            reason = verdict.get("reason", "")
             if decision == "CONTINUE":
-                claims_mgr.continue_claim(keyword, reason, round_num)
+                claims_mgr.continue_claim(
+                    keyword,
+                    reason,
+                    round_num,
+                    needs_agents=verdict.get("needs_agents", []),
+                    missing=verdict.get("missing", ""),
+                    allow_unknown_progress=verdict.get("allow_unknown_progress"),
+                    persist=False,
+                )
             else:
                 claims_mgr.close_claim(
-                    keyword, decision.removeprefix("CLOSED:"), reason, round_num,
+                    keyword,
+                    decision.removeprefix("CLOSED:"),
+                    reason,
+                    round_num,
+                    persist=False,
                 )
             accepted.append(verdict)
 
-        for keyword in sorted(mature_keywords - seen):
+        missing_keywords = sorted(offered_keywords - seen)
+        fallback_missing = (
+            "Host未返回有效定向裁决；需要重新审阅并补充缺失证据"
+        )
+        fallback_agents = [ac.name for ac in self._config.agents]
+        for keyword in missing_keywords:
             rejected.append({
                 "claim": keyword,
                 "verdict": None,
                 "host_reason": "",
                 "reason": "missing verdict",
             })
+            claims_mgr.continue_claim(
+                keyword,
+                "Host裁决缺失或无效，保持 OPEN",
+                round_num,
+                needs_agents=fallback_agents,
+                missing=fallback_missing,
+                allow_unknown_progress=False,
+                persist=False,
+            )
 
+        if accepted or missing_keywords:
+            claims_mgr.save()
         return accepted, rejected
 
     async def _host_summarize(
@@ -443,7 +592,8 @@ class DiscussionEngine:
         """Host generates final summary using its configured protocol."""
         logger.info("=== HOST SUMMARIZE ===")
         prompt = (
-            f"以下是完整的讨论记录：\n\n{claims_mgr.format_file()}\n\n"
+            "以下是完整的讨论记录：\n\n"
+            f"{ClaimsManager._truncate_ends(claims_mgr.format_file(), 100_000)}\n\n"
             f"讨论已经结束。请基于各方达成的共识和记录的分歧输出总结。"
         )
         return await self._call_host(
@@ -472,22 +622,15 @@ class DiscussionEngine:
             # Extract topic from context (first non-empty line or config)
             topic = context.strip().split("\n")[0] if context.strip() else "讨论议题"
             claims_mgr.topic = topic
-            # Round 1: agents propose initial claims
-            outputs = await self._round_1(claims_mgr, topic, context)
-            claims_mgr.merge_round(outputs)
-            self._archiver.save_round(1, "agents", {
-                "outputs": [
-                    {"agent_name": o.agent_name, "raw_text": o.raw_text}
-                    for o in outputs
-                ]
-            })
+            rounds_completed = 0
 
-            rounds_completed = 1
-
-            # Rounds 2..N: agents respond, then host judges
-            for round_num in range(2, max_rounds + 1):
-                # Send incremental update to agents
-                outputs = await self._round_n(claims_mgr, round_num, round_num - 1)
+            for round_num in range(1, max_rounds + 1):
+                if round_num == 1:
+                    outputs = await self._round_1(claims_mgr, topic, context)
+                else:
+                    outputs = await self._round_n(
+                        claims_mgr, round_num, round_num - 1,
+                    )
                 claims_mgr.merge_round(outputs)
                 self._archiver.save_round(round_num, "agents", {
                     "outputs": [
@@ -497,31 +640,32 @@ class DiscussionEngine:
                 })
                 rounds_completed = round_num
 
-                # Check convergence precondition for this round
                 precondition_met = self._check_convergence_precondition(
                     claims_mgr, round_num,
                 )
 
                 if precondition_met:
-                    # Ask host to judge
-                    mature_keywords = {
+                    offered_keywords = {
                         claim.keyword
-                        for claim in claims_mgr.get_mature_claims(
-                            {ac.name for ac in self._config.agents},
-                        )
+                        for claim in claims_mgr.get_host_candidates()
                     }
                     verdicts = await self._host_judge(claims_mgr, round_num)
                     accepted, rejected = self._apply_host_verdicts(
-                        claims_mgr, verdicts, mature_keywords, round_num,
+                        claims_mgr,
+                        verdicts,
+                        offered_keywords,
+                        round_num,
                     )
                     self._archiver.save_round(round_num, "host", {
                         "verdicts": verdicts,
                         "accepted_verdicts": accepted,
-                        "rejected_verdicts": rejected,
+                        "rejected_verdicts": [
+                            *self._host_protocol_rejections,
+                            *rejected,
+                        ],
                     })
 
-                # Check if all claims are closed
-                if not claims_mgr.get_open_claims():
+                if claims_mgr.claims and not claims_mgr.get_open_claims():
                     logger.info("All claims closed. Generating summary.")
                     if self._config.host.skip_summary:
                         summary = None
@@ -539,7 +683,9 @@ class DiscussionEngine:
                     )
 
             # Max rounds without full convergence
-            open_keywords = [c.keyword for c in claims_mgr.get_open_claims()]
+            open_keywords = [
+                claim.keyword for claim in claims_mgr.get_open_claims()
+            ]
             return DiscussionResult(
                 converged=False,
                 rounds_completed=rounds_completed,

@@ -72,7 +72,23 @@ class TestConfigLoaderDefaults:
 
         cfg = ConfigLoader.load(str(path))
         assert cfg.min_rounds == 2
-        assert cfg.max_rounds == 5
+        assert cfg.max_rounds == 6
+
+    def test_legacy_min_rounds_does_not_constrain_safety_cap(
+        self, tmp_path, sample_config_dict,
+    ):
+        d = dict(sample_config_dict)
+        d["discussion"] = {
+            "model": "claude-sonnet-4-20250514",
+            "min_rounds": 99,
+            "max_rounds": 6,
+        }
+        path = tmp_path / "legacy-min-rounds.yaml"
+        path.write_text(yaml.dump(d, allow_unicode=True))
+
+        cfg = ConfigLoader.load(str(path))
+        assert cfg.min_rounds == 99
+        assert cfg.max_rounds == 6
 
 
 class TestConfigLoaderValidation:
@@ -85,6 +101,21 @@ class TestConfigLoaderValidation:
         path.write_text(yaml.dump(d, allow_unicode=True))
 
         with pytest.raises(ValueError, match="agents"):
+            ConfigLoader.load(str(path))
+
+    @pytest.mark.parametrize("value", [0, -1, 1.5, "6"])
+    def test_max_rounds_must_be_a_positive_integer(
+        self, tmp_path, sample_config_dict, value,
+    ):
+        d = dict(sample_config_dict)
+        d["discussion"] = {
+            "model": "claude-sonnet-4-20250514",
+            "max_rounds": value,
+        }
+        path = tmp_path / "bad-max-rounds.yaml"
+        path.write_text(yaml.dump(d, allow_unicode=True))
+
+        with pytest.raises(ValueError, match="max_rounds"):
             ConfigLoader.load(str(path))
 
     def test_missing_host_raises(self, tmp_path, sample_config_dict):
@@ -158,6 +189,27 @@ class TestConfigLoaderValidation:
 
         cfg = ConfigLoader.load(str(path))
         assert cfg.tools == []
+
+    @pytest.mark.parametrize(
+        ("section", "field", "value"),
+        [
+            ("discussion", "strict_tool_loading", "false"),
+            ("discussion", "strict_tool_loading", 0),
+            ("host", "skip_summary", "false"),
+            ("host", "skip_summary", 1),
+        ],
+    )
+    def test_boolean_options_reject_non_boolean_values(
+        self, tmp_path, sample_config_dict, section, field, value,
+    ):
+        d = dict(sample_config_dict)
+        d[section] = dict(sample_config_dict[section])
+        d[section][field] = value
+        path = tmp_path / "invalid-bool.yaml"
+        path.write_text(yaml.dump(d, allow_unicode=True))
+
+        with pytest.raises(ValueError, match=rf"{section}\.{field} must be a boolean"):
+            ConfigLoader.load(str(path))
 
 
 class TestAgentConfigPerAgentTools:

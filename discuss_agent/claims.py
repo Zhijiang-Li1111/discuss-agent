@@ -57,17 +57,27 @@ class Claim:
 
 
 # Regex patterns for parsing claims.md
-_CLAIM_HEADER_RE = re.compile(r"^##CLAIM:(.+?)\s*\[(.+?)\]##\s*$")
+_CLAIM_HEADER_RE = re.compile(r"^##CLAIM:(.+)\s+\[([^\[\]]+)\]##\s*$")
 _ENTRY_RE = re.compile(
-    r"^\s*\[(?:(\w+)\s+)?FROM:(.+?)\s+@R(\d+)\]\s*(.*)$"
+    r"^\s*\[(?:(\w+)\s+)?FROM:(.+?)\s+@R(\d+)\][ ]?(.*)$"
 )
-_HOST_ENTRY_RE = re.compile(r"^\s*\[HOST\s+@R(\d+)\]\s*(.*)$")
+_HOST_ENTRY_RE = re.compile(r"^\s*\[HOST\s+@R(\d+)\][ ]?(.*)$")
 _UNMATCHED_HEADER = "##UNMATCHED_RESPONSES##"
+_NEEDS_AGENTS_PREFIX = "NEEDS_AGENTS："
+_MISSING_PREFIX = "MISSING："
+_ROUTING_PREFIX = "ROUTING_JSON："
 
 # Regex for parsing agent outputs
-_REBUTTAL_RE = re.compile(r"\[REBUTTAL\s+TO:(.+?)\]\s*(.*)", re.DOTALL)
-_ACCEPT_RE = re.compile(r"\[ACCEPT\s+TO:(.+?)\]\s*(.*)", re.DOTALL)
-_NEW_CLAIM_RE = re.compile(r"\[NEW_CLAIM:(.+?)\]\s*(.*)", re.DOTALL)
+_MARKER_TARGET = r"((?:[^\[\]\n]|\[[^\[\]\n]*\])+)"
+_REBUTTAL_RE = re.compile(
+    rf"\[REBUTTAL\s+TO:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
+)
+_ACCEPT_RE = re.compile(
+    rf"\[ACCEPT\s+TO:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
+)
+_NEW_CLAIM_RE = re.compile(
+    rf"\[NEW_CLAIM:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
+)
 
 
 @dataclass
@@ -82,11 +92,13 @@ class ParsedResponse:
 def parse_agent_output(text: str) -> list[ParsedResponse]:
     """Parse an agent's raw output into structured responses."""
     responses: list[ParsedResponse] = []
-    # Split by response markers
-    parts = re.split(r"(?=\[(?:REBUTTAL TO|ACCEPT TO|NEW_CLAIM):)", text)
+    parts = re.split(
+        r"(?m)(?=^\[(?:REBUTTAL TO|ACCEPT TO|NEW_CLAIM):)",
+        text,
+    )
     for part in parts:
-        part = part.strip()
-        if not part:
+        part = part.rstrip()
+        if not part.strip():
             continue
         m = _REBUTTAL_RE.match(part)
         if m:
@@ -183,13 +195,32 @@ class ClaimsManager:
                     at_boundary = False
             position += 1
         flush_buffer()
-        return list(dict.fromkeys(matched)), list(dict.fromkeys(unmatched))
+
+        unresolved: list[str] = []
+        for value in unmatched:
+            if "/" not in value:
+                unresolved.append(value)
+                continue
+            slash_targets = [part.strip() for part in value.split("/")]
+            if (
+                all(slash_targets)
+                and all(part in known_targets for part in slash_targets)
+            ):
+                matched.extend(slash_targets)
+            else:
+                unresolved.append(value)
+        return list(dict.fromkeys(matched)), list(dict.fromkeys(unresolved))
 
     def parse_claims_file(self) -> None:
         """Parse an existing claims.md file into memory."""
         if not self.claims_file or not Path(self.claims_file).exists():
             return
-        text = Path(self.claims_file).read_text(encoding="utf-8")
+        with Path(self.claims_file).open(
+            "r",
+            encoding="utf-8",
+            newline="",
+        ) as claims_stream:
+            text = claims_stream.read()
         self._parse_text(text)
 
     def _parse_text(self, text: str) -> None:
@@ -205,15 +236,17 @@ class ClaimsManager:
             nonlocal pending_entry_meta, multiline_buffer
             if pending_entry_meta and current_claim is not None:
                 entry_type, agent, rnd = pending_entry_meta
-                content = "\n".join(multiline_buffer).strip()
-                if content:
-                    current_claim.add_entry(
-                        ClaimEntry(entry_type, agent, rnd, content)
-                    )
+                content = "\n".join(multiline_buffer)
+                current_claim.add_entry(
+                    ClaimEntry(entry_type, agent, rnd, content)
+                )
             multiline_buffer = []
             pending_entry_meta = None
 
-        for line in text.split("\n"):
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        for line in lines:
             if line == _UNMATCHED_HEADER:
                 _flush_multiline()
                 current_claim = None
@@ -247,6 +280,8 @@ class ClaimsManager:
                 _flush_multiline()
                 keyword = m.group(1).strip()
                 status = m.group(2).strip()
+                if keyword in self.claims:
+                    raise ValueError(f"Duplicate persisted claim: {keyword}")
                 current_claim = Claim(keyword=keyword, status=status)
                 self.claims[keyword] = current_claim
                 continue
@@ -362,86 +397,352 @@ class ClaimsManager:
             None,
         )
 
-    def get_mature_claims(self, all_agent_names: set[str]) -> list[Claim]:
-        """Return OPEN claims with every currently required response present."""
-        return [
-            claim for claim in self.get_open_claims()
-            if not self.agents_needing_response(claim, all_agent_names)
-        ]
-
-    def agents_needing_response(
-        self, claim: Claim, all_agent_names: set[str],
-    ) -> set[str]:
-        """Return agents that must respond after the latest substantive event."""
-        proposer = self.proposer_for(claim)
-        initial = next(
-            (entry for entry in claim.entries if entry.entry_type == "FROM"),
-            None,
-        )
-        responses = [
-            entry for entry in claim.entries
-            if entry.entry_type in {"ACCEPT", "REBUTTAL", "RESPONSE"}
-        ]
-        triggers = [
-            entry for entry in claim.entries
-            if entry.entry_type == "REBUTTAL"
-            or (
-                entry.entry_type == "HOST"
-                and entry.content.startswith("CONTINUE：")
-            )
-        ]
-
-        if not triggers:
-            required = all_agent_names - ({proposer} if proposer else set())
-            initial_round = initial.round_num if initial else -1
-            responded = {
-                entry.agent_name for entry in responses
-                if entry.round_num > initial_round
-            }
-            return required - responded
-
-        latest_round = max(entry.round_num for entry in triggers)
-        latest = [entry for entry in triggers if entry.round_num == latest_round]
-        if any(entry.entry_type == "HOST" for entry in latest):
-            required = set(all_agent_names)
-            responded = {
-                entry.agent_name for entry in responses
-                if entry.round_num > latest_round
-            }
-        else:
-            rebutters = {entry.agent_name for entry in latest}
-            required = set(all_agent_names)
-            responded = (rebutters if len(rebutters) == 1 else set()) | {
-                entry.agent_name for entry in responses
-                if entry.round_num > latest_round
-            }
-        return required - responded
+    def get_host_candidates(self) -> list[Claim]:
+        """Return every OPEN claim for semantic Host review."""
+        return self.get_open_claims()
 
     @staticmethod
-    def _format_response_context(claim: Claim) -> str:
-        """Render the original claim plus entries in the latest dispute epoch."""
-        initial = next(
-            (entry for entry in claim.entries if entry.entry_type == "FROM"),
+    def claim_keywords_from_formatted(text: str) -> set[str]:
+        """Extract claim keywords using the persisted header grammar."""
+        return {
+            match.group(1).strip()
+            for line in text.split("\n")
+            if (match := _CLAIM_HEADER_RE.match(line))
+        }
+
+    @staticmethod
+    def _host_request(claim: Claim) -> tuple[set[str], str]:
+        """Read the latest persisted Host routing request for a claim."""
+        routing = ClaimsManager._host_routing(claim)
+        return set(routing["needs_agents"]), routing["missing"]
+
+    @staticmethod
+    def _host_routing(claim: Claim) -> dict[str, object]:
+        """Read the latest persisted Host routing context for a claim."""
+        host_entry = next(
+            (
+                entry for entry in reversed(claim.entries)
+                if entry.entry_type == "HOST"
+                and entry.content.startswith("CONTINUE：")
+            ),
             None,
         )
-        triggers = [
-            entry for entry in claim.entries
-            if entry.entry_type == "REBUTTAL"
-            or (
-                entry.entry_type == "HOST"
-                and entry.content.startswith("CONTINUE：")
-            )
-        ]
-        entries = [initial] if initial else []
-        if triggers:
-            latest_round = max(entry.round_num for entry in triggers)
-            entries.extend(
-                entry for entry in claim.entries
-                if entry is not initial and entry.round_num >= latest_round
-            )
-        return Claim(claim.keyword, claim.status, entries).format()
+        if host_entry is None:
+            return {
+                "needs_agents": [],
+                "missing": "",
+                "allow_unknown_progress": None,
+            }
+        agents: set[str] = set()
+        missing = ""
+        allow_unknown_progress: bool | None = None
+        for line in host_entry.content.splitlines()[1:]:
+            if line.startswith(_ROUTING_PREFIX):
+                try:
+                    routing = json.loads(line.removeprefix(_ROUTING_PREFIX))
+                    agents = set(routing.get("needs_agents", []))
+                    missing = routing.get("missing", "")
+                    allow_unknown_progress = routing.get(
+                        "allow_unknown_progress",
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            elif line.startswith(_NEEDS_AGENTS_PREFIX):
+                agents = {
+                    name.strip()
+                    for name in line.removeprefix(_NEEDS_AGENTS_PREFIX).split(",")
+                    if name.strip()
+                }
+            elif line.startswith(_MISSING_PREFIX):
+                missing = line.removeprefix(_MISSING_PREFIX).strip()
+        return {
+            "needs_agents": sorted(agents),
+            "missing": missing,
+            "allow_unknown_progress": allow_unknown_progress,
+        }
 
-    def close_claim(self, keyword: str, verdict: str, reason: str, round_num: int) -> None:
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        marker = "\n...[内容已省略/截断，信息可能不完整]"
+        return text[: max(0, limit - len(marker))].rstrip() + marker
+
+    @staticmethod
+    def _truncate_ends(text: str, limit: int) -> str:
+        """Bound text while retaining both the claim identity and latest context."""
+        if len(text) <= limit:
+            return text
+        marker = "\n...[中间内容已省略/截断，首尾信息保留]...\n"
+        if limit <= len(marker):
+            return marker[:max(0, limit)]
+        available = max(0, limit - len(marker))
+        head_size = available // 2
+        tail_size = available - head_size
+        return (
+            text[:head_size].rstrip()
+            + marker
+            + text[-tail_size:].lstrip()
+        )
+
+    @classmethod
+    def _compact_claim(cls, claim: Claim, limit: int = 800) -> str:
+        """Keep every claim visible without replaying its full history."""
+        if not claim.entries:
+            return f"##CLAIM:{claim.keyword} [{claim.status}]##"
+        selected_ids = {
+            id(claim.entries[0]),
+            *(
+                id(entry)
+                for entry in claim.entries[-2:]
+            ),
+        }
+        rebuttal_rounds = [
+            entry.round_num
+            for entry in claim.entries
+            if entry.entry_type == "REBUTTAL"
+        ]
+        if rebuttal_rounds:
+            latest_rebuttal_round = max(rebuttal_rounds)
+            selected_ids.update(
+                id(entry)
+                for entry in claim.entries
+                if entry.entry_type == "REBUTTAL"
+                and entry.round_num == latest_rebuttal_round
+            )
+        latest_host = next(
+            (
+                entry for entry in reversed(claim.entries)
+                if entry.entry_type == "HOST"
+            ),
+            None,
+        )
+        if latest_host is not None:
+            selected_ids.add(id(latest_host))
+        selected = [
+            entry for entry in claim.entries if id(entry) in selected_ids
+        ]
+        omitted = len(claim.entries) - len({id(entry) for entry in selected})
+        header = f"##CLAIM:{claim.keyword} [{claim.status}]##"
+        omission_marker = ""
+        if omitted > 0:
+            omission_marker = (
+                f"\n...[中间{omitted}条记录已省略；现有信息不足时选择CONTINUE]"
+            )
+        prefixes: list[str] = []
+        for entry in selected:
+            if entry.entry_type == "HOST":
+                tag = f"[HOST @R{entry.round_num}]"
+            elif entry.entry_type == "FROM":
+                tag = f"[FROM:{entry.agent_name} @R{entry.round_num}]"
+            else:
+                tag = (
+                    f"[{entry.entry_type} FROM:{entry.agent_name} "
+                    f"@R{entry.round_num}]"
+                )
+            indent = "" if entry.entry_type == "FROM" else "  "
+            prefixes.append(f"{indent}{tag}")
+        separators = len(selected)
+        identity_size = (
+            len(header)
+            + separators
+            + sum(len(prefix) for prefix in prefixes)
+        )
+        if identity_size > limit:
+            marker = (
+                "\n...[反驳身份截断：反驳身份超出上下文安全上限；内容已截断；"
+                "部分身份未展开，必须CONTINUE，不得据此收敛]...\n"
+            )
+            available = max(0, limit - len(header) - len(marker) - 1)
+            identities = "\n".join(prefixes)
+            head_size = available // 2
+            tail_size = available - head_size
+            tail = identities[-tail_size:] if tail_size else ""
+            return (
+                header
+                + "\n"
+                + identities[:head_size].rstrip()
+                + marker
+                + tail.lstrip()
+            )[:limit]
+        content_budget = max(
+            0,
+            limit
+            - len(header)
+            - len(omission_marker)
+            - separators
+            - sum(len(prefix) for prefix in prefixes)
+            - len(selected),
+        )
+        body_limit, body_extra = divmod(
+            content_budget, max(1, len(selected)),
+        )
+        blocks: list[str] = []
+        for index, (entry, prefix) in enumerate(zip(selected, prefixes)):
+            entry_limit = body_limit + (1 if index < body_extra else 0)
+            body = cls._truncate_ends(entry.content, entry_limit)
+            blocks.append(prefix + (f" {body}" if body else ""))
+        rendered = header + "\n" + "\n".join(blocks) + omission_marker
+        return cls._truncate_ends(rendered, limit)
+
+    def format_host_candidate_batches(
+        self, max_chars: int = 80_000, max_claims: int = 40,
+    ) -> list[str]:
+        """Render every OPEN claim in independently bounded Host batches."""
+        batches: list[str] = []
+        current: list[str] = []
+        current_size = 0
+        for claim in self.get_host_candidates():
+            block = self._compact_claim(claim, min(4_000, max_chars))
+            block_size = len(block) + (2 if current else 0)
+            if current and (
+                current_size + block_size > max_chars
+                or len(current) >= max_claims
+            ):
+                batches.append("\n\n".join(current))
+                current = []
+                current_size = 0
+                block_size = len(block)
+            current.append(block)
+            current_size += block_size
+        if current:
+            batches.append("\n\n".join(current))
+        return batches
+
+    def format_host_global_context(self, max_chars: int = 40_000) -> str:
+        """Summarize every OPEN claim for cross-batch semantic consistency."""
+        claims = self.get_host_candidates()
+        if not claims:
+            return ""
+        prefixes = [f"- {claim.keyword}: " for claim in claims]
+        fixed_size = sum(len(prefix) for prefix in prefixes) + len(claims) - 1
+        available = max(0, max_chars - fixed_size)
+        base_content_limit, extra = divmod(available, len(claims))
+        lines: list[str] = []
+        for index, (claim, prefix) in enumerate(zip(claims, prefixes)):
+            content_limit = base_content_limit + (1 if index < extra else 0)
+            critical_ids: set[int] = set()
+            for entry_type in ("REBUTTAL", "HOST"):
+                latest = next(
+                    (
+                        entry for entry in reversed(claim.entries)
+                        if entry.entry_type == entry_type
+                    ),
+                    None,
+                )
+                if latest is not None:
+                    critical_ids.add(id(latest))
+            if claim.entries:
+                critical_ids.add(id(claim.entries[-1]))
+            critical = [
+                entry for entry in claim.entries
+                if id(entry) in critical_ids
+            ]
+            labels = [f"{entry.entry_type}: " for entry in critical]
+            summary_overhead = (
+                sum(len(label) for label in labels)
+                + max(0, len(labels) - 1) * 3
+            )
+            if content_limit <= summary_overhead:
+                summary = self._truncate_ends(
+                    " | ".join(labels),
+                    content_limit,
+                )
+            else:
+                body_total = content_limit - summary_overhead
+                body_limit, body_extra = divmod(
+                    body_total,
+                    max(1, len(critical)),
+                )
+                summaries: list[str] = []
+                for entry_index, (entry, label) in enumerate(
+                    zip(critical, labels)
+                ):
+                    limit = body_limit + (
+                        1 if entry_index < body_extra else 0
+                    )
+                    summaries.append(
+                        label + self._truncate_ends(
+                            entry.content.replace("\n", " "),
+                            limit,
+                        )
+                    )
+                summary = " | ".join(summaries)
+            lines.append(prefix + summary)
+        return self._truncate_ends("\n".join(lines), max_chars)
+
+    @classmethod
+    def _bounded_blocks(
+        cls, blocks: list[str], budget: int, omitted_label: str,
+    ) -> list[str]:
+        """Fit whole blocks into a prompt section and disclose omissions."""
+        selected: list[str] = []
+        used = 0
+        for block in blocks:
+            separator_size = 1 if selected else 0
+            if used + separator_size + len(block) > budget:
+                break
+            selected.append(block)
+            used += separator_size + len(block)
+        omitted = len(blocks) - len(selected)
+        if omitted:
+            marker = f"...[{omitted} {omitted_label}因上下文安全上限未展开]"
+            omitted_keywords = [
+                match.group(1)
+                for block in blocks[len(selected):]
+                if (match := re.search(r"##CLAIM:(.+?)\s+\[", block))
+            ]
+            if omitted_keywords:
+                preview = ", ".join(omitted_keywords[:10])
+                suffix = "..." if len(omitted_keywords) > 10 else ""
+                marker = marker[:-1] + f"：{preview}{suffix}]"
+            if used + len(marker) + 1 <= budget:
+                selected.append(marker)
+            elif selected:
+                selected[-1] = cls._truncate(
+                    selected[-1], max(40, len(selected[-1]) - len(marker) - 1),
+                )
+                selected.append(marker)
+            else:
+                selected.append(cls._truncate(marker, budget))
+        return selected
+
+    @classmethod
+    def _bounded_all_blocks(cls, blocks: list[str], budget: int) -> list[str]:
+        """Keep every routed block visible by sharing the section budget."""
+        if not blocks:
+            return []
+        separators = len(blocks) - 1
+        if separators > budget:
+            return [cls._truncate(
+                f"...[{len(blocks)}个定向请求超出上下文安全上限]",
+                budget,
+            )]
+        block_budget, extra = divmod(
+            budget - separators,
+            len(blocks),
+        )
+        return [
+            cls._truncate_ends(block, block_budget + (index < extra))
+            for index, block in enumerate(blocks)
+        ]
+
+    @classmethod
+    def _format_response_context(
+        cls, claim: Claim, limit: int = 7_000,
+    ) -> str:
+        """Render the original claim plus the latest substantive context."""
+        return cls._compact_claim(claim, limit)
+
+    def close_claim(
+        self,
+        keyword: str,
+        verdict: str,
+        reason: str,
+        round_num: int,
+        *,
+        persist: bool = True,
+    ) -> None:
         """Host closes a claim with a verdict."""
         if keyword not in self.claims:
             return
@@ -453,28 +754,49 @@ class ClaimsManager:
             round_num=round_num,
             content=f"裁决：{reason}",
         ))
-        self.save()
+        if persist:
+            self.save()
 
-    def continue_claim(self, keyword: str, reason: str, round_num: int) -> None:
-        """Record a Host CONTINUE decision and reopen responses for all agents."""
+    def continue_claim(
+        self,
+        keyword: str,
+        reason: str,
+        round_num: int,
+        *,
+        needs_agents: list[str] | None = None,
+        missing: str = "",
+        allow_unknown_progress: bool | None = None,
+        persist: bool = True,
+    ) -> None:
+        """Persist a Host CONTINUE decision and optional semantic routing."""
         claim = self.claims.get(keyword)
         if claim is None or claim.status != "OPEN":
             return
+        content = f"CONTINUE：{reason}"
+        routing = {
+            "needs_agents": needs_agents or [],
+            "missing": missing,
+            "allow_unknown_progress": allow_unknown_progress,
+        }
+        content += (
+            f"\n{_ROUTING_PREFIX}"
+            f"{json.dumps(routing, ensure_ascii=False, separators=(',', ':'))}"
+        )
         claim.add_entry(ClaimEntry(
             entry_type="HOST",
             agent_name="HOST",
             round_num=round_num,
-            content=f"CONTINUE：{reason}",
+            content=content,
         ))
         self.current_round = max(self.current_round, round_num)
-        self.save()
+        if persist:
+            self.save()
 
     def generate_update_prompt(
         self,
         prev_round: int,
         *,
         agent_name: str | None = None,
-        all_agent_names: set[str] | None = None,
     ) -> str:
         """Generate incremental update prompt for agents.
 
@@ -482,46 +804,52 @@ class ClaimsManager:
         - CLOSED/new claims since prev_round: only status change notification
         """
         status_changes: list[str] = []
-        needs_response_text: list[str] = []
-        awaiting_host: list[str] = []
-        mature_keywords = (
-            {claim.keyword for claim in self.get_mature_claims(all_agent_names)}
-            if all_agent_names
-            else set()
-        )
+        directed_requests: list[str] = []
+        open_claims: list[str] = []
 
         for claim in self.claims.values():
             # Check if status changed since prev_round
             has_recent_host = any(
-                e.entry_type == "HOST" and e.round_num > prev_round
+                e.entry_type == "HOST" and e.round_num >= prev_round
                 for e in claim.entries
             )
             has_recent_new = any(
-                e.entry_type == "FROM" and e.round_num > prev_round
+                e.entry_type == "FROM" and e.round_num >= prev_round
                 for e in claim.entries
             ) and claim.status == "OPEN"
 
             if claim.status == "OPEN":
-                proposer = self.proposer_for(claim)
-                needs_response = (
-                    agent_name in self.agents_needing_response(
-                        claim, all_agent_names,
-                    )
-                    if agent_name is not None and all_agent_names is not None
-                    else False
-                )
                 if agent_name is None:
-                    needs_response_text.append(claim.format())
-                elif needs_response:
-                    needs_response_text.append(self._format_response_context(claim))
-                elif claim.keyword in mature_keywords:
-                    awaiting_host.append(f"- CLAIM:{claim.keyword}")
-                elif agent_name == proposer and not any(
-                    entry.entry_type == "REBUTTAL" for entry in claim.entries
-                ):
-                    awaiting_host.append(f"- CLAIM:{claim.keyword}（你提出；暂无反驳）")
+                    open_claims.append(claim.format())
                 else:
-                    awaiting_host.append(f"- CLAIM:{claim.keyword}（你已回应）")
+                    routing = self._host_routing(claim)
+                    requested_agents = set(routing["needs_agents"])
+                    missing = routing["missing"]
+                    if agent_name in requested_agents:
+                        suffix_lines: list[str] = []
+                        if missing:
+                            suffix_lines.append(
+                                "HOST指出的缺口："
+                                + self._truncate_ends(str(missing), 1_000)
+                            )
+                        allow_unknown = routing["allow_unknown_progress"]
+                        if allow_unknown is not None:
+                            policy = "允许" if allow_unknown else "不允许"
+                            suffix_lines.append(
+                                f"HOST判断：{policy}带 UNKNOWN 推进"
+                            )
+                        suffix = "\n".join(suffix_lines)
+                        context_budget = 8_000 - len(suffix) - (
+                            1 if suffix else 0
+                        )
+                        request = self._format_response_context(
+                            claim, context_budget,
+                        )
+                        if suffix:
+                            request += "\n" + suffix
+                        directed_requests.append(request)
+                    else:
+                        open_claims.append(self._compact_claim(claim, 8_000))
                 if has_recent_new and len(claim.entries) == 1:
                     status_changes.append(f"- [新增] CLAIM:{claim.keyword}")
                 if has_recent_host:
@@ -535,31 +863,59 @@ class ClaimsManager:
 
         if status_changes:
             parts.append("\n状态变化：")
-            parts.extend(status_changes)
+            parts.extend(self._bounded_blocks(
+                status_changes, 8_000, "条状态变化",
+            ))
 
-        if needs_response_text:
-            parts.append("\n## NEEDS_YOUR_RESPONSE\n")
-            parts.extend(needs_response_text)
-        if awaiting_host:
-            parts.append("\n## AWAITING_HOST（无需重复回应）")
-            parts.extend(awaiting_host)
+        if directed_requests:
+            parts.append("\n## HOST定向请求\n")
+            parts.extend(self._bounded_all_blocks(directed_requests, 32_000))
+        if open_claims:
+            parts.append("\n## OPEN CLAIMS（语义审阅）\n")
+            parts.extend(self._bounded_blocks(
+                open_claims, 40_000, "claims",
+            ))
 
         recent_unmatched = [
             item for item in self.unmatched_responses
-            if int(item["round_num"]) > prev_round
+            if int(item["round_num"]) >= prev_round
             and (agent_name is None or item["agent_name"] == agent_name)
         ]
         if recent_unmatched:
-            parts.append("\n## 上轮未匹配的target（请改用单个精确关键词）")
-            parts.extend(f"- {item['target']}" for item in recent_unmatched)
+            parts.append("\n## 上轮协议冲突（请按精确关键词修正）")
+            audit_blocks: list[str] = []
+            for item in recent_unmatched:
+                target = str(item["target"])
+                if item.get("response_type") == "DUPLICATE_NEW_CLAIM":
+                    content = json.dumps(
+                        item.get("content", ""),
+                        ensure_ascii=False,
+                    )
+                    audit_blocks.append(
+                        f"- 重复 NEW_CLAIM CLAIM:{target} 未写入；"
+                        f"冲突内容={content}；"
+                        f"若要质疑现有 claim，改用 [REBUTTAL TO:{target}]。"
+                    )
+                else:
+                    audit_blocks.append(
+                        f"- 未匹配 target：{target}；"
+                        "请改用单个精确关键词。"
+                    )
+            parts.extend(self._bounded_blocks(
+                audit_blocks,
+                8_000,
+                "个协议冲突",
+            ))
 
         parts.append(
             "\n## 你的任务\n"
-            "只回应 NEEDS_YOUR_RESPONSE；AWAITING_HOST 不要重复回应。\n"
+            "根据你的职责和专业判断审阅 OPEN CLAIMS；不要用固定数量、固定轮次或全员回应代替实质判断。\n"
+            "优先处理 HOST定向请求。其他 claim 仅在与你的职责或证据相关时回应；没有实质增量时不要机械重复。\n"
             "- [REBUTTAL TO:关键词] 反驳 + 证据\n"
             "- [ACCEPT TO:关键词] 接受 + 理由\n"
             "- 每个 ACCEPT/REBUTTAL marker 只能写一个精确关键词，不得批量列出。\n"
-            "- [NEW_CLAIM:关键词] 仅限新证据、新反证或新的实质UNKNOWN；不要为状态改名另开claim。\n"
+            "- [NEW_CLAIM:关键词] 仅限新的实质主张、证据、反证或 UNKNOWN；不要为状态改名另开claim。\n"
+            "- 证据不足时明确 UNKNOWN、缺什么、应由谁补证；不要把沉默当作同意。\n"
             "可以随时用 research_search 或 web_search 搜索证据。"
         )
 
@@ -574,12 +930,21 @@ class ClaimsManager:
         """Generate the initial prompt for Round 1."""
         parts = []
         if limitation:
-            parts.append(f"⚠️ 本次讨论范围仅限于：{limitation}\n")
-        parts.append(f"议题：{topic}\n")
+            parts.append(
+                f"⚠️ 本次讨论范围仅限于：{self._truncate(limitation, 8_000)}\n"
+            )
+        parts.append(f"议题：{self._truncate(topic, 4_000)}\n")
         if context:
-            parts.append(f"## 已确认背景材料\n\n{context.strip()}\n")
+            parts.append(
+                "## 已确认背景材料\n\n"
+                f"{self._truncate(context.strip(), 80_000)}\n"
+            )
         parts.append(
-            "请基于你的专业分析提出观点。\n\n"
+            "请基于你的职责和专业判断提出观点；只对有能力核查的部分下结论。\n"
+            "证据标准：事实必须可追溯，区分事实、推断和 UNKNOWN，并说明适用边界。\n"
+            "主动寻找反例、反证和失败条件；不得把无人反驳当作共识，"
+            "也不得用固定回应数或固定轮次代替判断。\n"
+            "证据不足时明确缺口及最适合补证的角色，不要猜测或机械附和。\n\n"
             "**输出格式要求：**\n"
             "- [NEW_CLAIM:关键词] 你的论点和证据\n"
             "- 每个独立论点用一个 NEW_CLAIM 标记\n"
@@ -594,18 +959,34 @@ class ClaimsManager:
         p = Path(self.claims_file)
         p.parent.mkdir(parents=True, exist_ok=True)
         text = self.format_file()
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=p.parent,
-            prefix=f".{p.name}.",
-            delete=False,
-        ) as temp_file:
-            temp_file.write(text)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-            temp_name = temp_file.name
-        os.replace(temp_name, p)
+        temp_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=p.parent,
+                prefix=f".{p.name}.",
+                delete=False,
+            ) as temp_file:
+                temp_name = temp_file.name
+                temp_file.write(text)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_name, p)
+            directory_fd = os.open(
+                p.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if temp_name is not None:
+                try:
+                    os.unlink(temp_name)
+                except FileNotFoundError:
+                    pass
 
     def format_file(self) -> str:
         """Render the full claims.md content."""

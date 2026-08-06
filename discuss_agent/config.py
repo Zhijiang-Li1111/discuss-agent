@@ -224,6 +224,12 @@ class DiscussionConfig:
 _REQUIRED_TOP_KEYS = ("agents", "host", "tools")
 
 
+def _validated_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
 class ConfigLoader:
     """Load and validate a discussion YAML configuration file."""
 
@@ -251,13 +257,17 @@ class ConfigLoader:
             )
 
         min_rounds: int = disc.get("min_rounds", 2)
-        max_rounds: int = disc.get("max_rounds", 5)
-        strict_tool_loading = bool(disc.get("strict_tool_loading", False))
-
-        if min_rounds > max_rounds:
-            raise ValueError(
-                f"min_rounds ({min_rounds}) must not exceed max_rounds ({max_rounds})"
-            )
+        max_rounds: int = disc.get("max_rounds", 6)
+        strict_tool_loading = _validated_bool(
+            disc.get("strict_tool_loading", False),
+            "discussion.strict_tool_loading",
+        )
+        if (
+            not isinstance(max_rounds, int)
+            or isinstance(max_rounds, bool)
+            or max_rounds < 1
+        ):
+            raise ValueError("discussion.max_rounds must be a positive integer")
 
         model_config = ModelConfig(
             model=disc["model"],
@@ -299,7 +309,10 @@ class ConfigLoader:
             base_url=resolve_env(host_raw.get("base_url")),
             temperature=host_raw.get("temperature"),
             max_tokens=host_raw.get("max_tokens"),
-            skip_summary=bool(host_raw.get("skip_summary", False)),
+            skip_summary=_validated_bool(
+                host_raw.get("skip_summary", False),
+                "host.skip_summary",
+            ),
         )
 
         # --- context (optional, opaque dict passed to context builder) ---

@@ -82,9 +82,29 @@ async def test_natural_convergence_ignores_legacy_min_rounds(
 
     MockConversation.side_effect = conversation
     engine = DiscussionEngine(config)
-    engine._host_judge = AsyncMock(return_value=[
-        {"claim": "item-A", "verdict": "CLOSED:共识", "reason": "ok"},
-        {"claim": "item-B", "verdict": "CLOSED:共识", "reason": "ok"},
+    engine._host_judge = AsyncMock(side_effect=[
+        [
+            {
+                "claim": "item-A",
+                "verdict": "CONTINUE",
+                "reason": "peer review needed",
+                "missing": "B review",
+                "needs_agents": ["B"],
+                "allow_unknown_progress": False,
+            },
+            {
+                "claim": "item-B",
+                "verdict": "CONTINUE",
+                "reason": "peer review needed",
+                "missing": "A review",
+                "needs_agents": ["A"],
+                "allow_unknown_progress": False,
+            },
+        ],
+        [
+            {"claim": "item-A", "verdict": "CLOSED:共识", "reason": "ok"},
+            {"claim": "item-B", "verdict": "CLOSED:共识", "reason": "ok"},
+        ],
     ])
 
     result = await engine.run()
@@ -92,61 +112,143 @@ async def test_natural_convergence_ignores_legacy_min_rounds(
     assert result.converged is True
     assert result.rounds_completed == 2
     assert counts == {"A": 2, "B": 2}
+    assert engine._host_judge.await_count == 2
+    assert [call.args[1] for call in engine._host_judge.await_args_list] == [1, 2]
+
+
+@patch("discuss_agent.engine.generate_usage_summary")
+@patch("discuss_agent.engine.AuditLogger")
+@patch("discuss_agent.engine.Archiver")
+@patch("discuss_agent.engine.ContextManager")
+@patch("discuss_agent.engine.AgentConversation")
+async def test_host_can_semantically_close_claim_in_round_one(
+    MockConversation, MockContext, MockArchiver, MockAudit, _summary,
+):
+    from discuss_agent.engine import DiscussionEngine
+
+    config = _config(max_rounds=6)
+    config.host.skip_summary = True
+    archiver = MagicMock()
+    archiver.start_session.return_value = "/tmp/runtime-round-one"
+    MockArchiver.return_value = archiver
+    MockAudit.return_value = MagicMock()
+    MockContext.return_value.build_initial_context = AsyncMock(return_value="topic")
+
+    def conversation(**kwargs):
+        conv = MagicMock(messages=[])
+        text = "[NEW_CLAIM:sufficient] evidence" if kwargs["agent_name"] == "A" else ""
+        conv.send = AsyncMock(return_value=text)
+        return conv
+
+    MockConversation.side_effect = conversation
+    engine = DiscussionEngine(config)
+    engine._host_judge = AsyncMock(return_value=[
+        {"claim": "sufficient", "verdict": "CLOSED:共识", "reason": "enough"},
+    ])
+
+    result = await engine.run()
+
+    assert result.converged is True
+    assert result.rounds_completed == 1
     engine._host_judge.assert_awaited_once()
-    assert engine._host_judge.await_args.args[1] == 2
+    assert engine._host_judge.await_args.args[1] == 1
 
 
-def test_host_precondition_is_claim_local_and_cumulative():
+@patch("discuss_agent.engine.generate_usage_summary")
+@patch("discuss_agent.engine.AuditLogger")
+@patch("discuss_agent.engine.Archiver")
+@patch("discuss_agent.engine.ContextManager")
+@patch("discuss_agent.engine.AgentConversation")
+async def test_silent_agents_do_not_block_host_review_of_existing_claims(
+    MockConversation, MockContext, MockArchiver, MockAudit, _summary,
+):
+    from discuss_agent.engine import DiscussionEngine
+
+    config = _config(max_rounds=2)
+    config.host.skip_summary = True
+    archiver = MagicMock()
+    archiver.start_session.return_value = "/tmp/runtime-silent-agents"
+    MockArchiver.return_value = archiver
+    MockAudit.return_value = MagicMock()
+    MockContext.return_value.build_initial_context = AsyncMock(return_value="topic")
+
+    def conversation(**kwargs):
+        conv = MagicMock(messages=[])
+        if kwargs["agent_name"] == "A":
+            conv.send = AsyncMock(side_effect=["[NEW_CLAIM:X] evidence", "", ""])
+        else:
+            conv.send = AsyncMock(return_value="")
+        return conv
+
+    MockConversation.side_effect = conversation
+    engine = DiscussionEngine(config)
+    engine._host_judge = AsyncMock(side_effect=[
+        [{
+            "claim": "X",
+            "verdict": "CONTINUE",
+            "reason": "Host will reassess",
+            "missing": "independent reassessment",
+            "needs_agents": ["A"],
+            "allow_unknown_progress": False,
+        }],
+        [{"claim": "X", "verdict": "CLOSED:共识", "reason": "sufficient"}],
+    ])
+
+    result = await engine.run()
+
+    assert result.converged is True
+    assert result.rounds_completed == 2
+    assert [call.args[1] for call in engine._host_judge.await_args_list] == [1, 2]
+
+
+def test_host_precondition_allows_any_open_claim_without_agent_response_gate():
     from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
     from discuss_agent.engine import DiscussionEngine
 
     config = _config(max_rounds=4)
     config.agents.append(AgentConfig(name="C", system_prompt="C"))
     mgr = ClaimsManager()
-    mgr.claims["mature"] = Claim("mature", "OPEN", [
+    mgr.claims["unreviewed"] = Claim("unreviewed", "OPEN", [
         ClaimEntry("FROM", "A", 1, "claim"),
-        ClaimEntry("ACCEPT", "B", 2, "ok"),
-        ClaimEntry("ACCEPT", "C", 3, "ok"),
-    ])
-    mgr.claims["new"] = Claim("new", "OPEN", [
-        ClaimEntry("FROM", "B", 3, "claim"),
     ])
 
-    assert DiscussionEngine(config)._check_convergence_precondition(mgr, round_num=3) is True
+    assert DiscussionEngine(config)._check_convergence_precondition(mgr, round_num=1) is True
 
 
-def test_host_verdicts_reject_non_mature_unknown_duplicate_and_apply_continue():
+def test_host_verdicts_accept_any_offered_open_claim_and_apply_targeted_continue():
     from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
     from discuss_agent.engine import DiscussionEngine
 
     mgr = ClaimsManager()
-    mgr.claims["mature"] = Claim("mature", "OPEN", [
+    mgr.claims["unreviewed"] = Claim("unreviewed", "OPEN", [
         ClaimEntry("FROM", "A", 1, "claim"),
-        ClaimEntry("ACCEPT", "B", 2, "ok"),
-    ])
-    mgr.claims["new"] = Claim("new", "OPEN", [
-        ClaimEntry("FROM", "A", 2, "new"),
     ])
     verdicts = [
-        {"claim": "mature", "verdict": "CONTINUE", "reason": "more work"},
-        {"claim": "mature", "verdict": "CLOSED:共识", "reason": "duplicate"},
-        {"claim": "new", "verdict": "CLOSED:共识", "reason": "too early"},
+        {
+            "claim": "unreviewed",
+            "verdict": "CONTINUE",
+            "reason": "more work",
+            "needs_agents": ["B"],
+            "missing": "counterevidence",
+            "allow_unknown_progress": False,
+        },
+        {"claim": "unreviewed", "verdict": "CLOSED:共识", "reason": "duplicate"},
         {"claim": "missing", "verdict": "CLOSED:分歧", "reason": "unknown"},
     ]
 
     accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
-        mgr, verdicts, {"mature"}, round_num=2,
+        mgr, verdicts, {"unreviewed"}, round_num=2,
     )
 
     assert accepted == [verdicts[0]]
     assert [item["reason"] for item in rejected] == [
         "duplicate verdict",
-        "claim was not in the mature set",
-        "claim was not in the mature set",
+        "claim was not offered to the host",
     ]
-    assert mgr.claims["mature"].status == "OPEN"
-    assert mgr.claims["mature"].entries[-1].content == "CONTINUE：more work"
-    assert mgr.claims["new"].status == "OPEN"
+    assert mgr.claims["unreviewed"].status == "OPEN"
+    assert mgr._host_request(mgr.claims["unreviewed"]) == (
+        {"B"}, "counterevidence",
+    )
 
 
 def test_host_verdicts_record_mature_claim_omitted_by_host():
@@ -167,6 +269,32 @@ def test_host_verdicts_record_mature_claim_omitted_by_host():
         "host_reason": "",
         "reason": "missing verdict",
     }]
+
+
+def test_applying_multiple_host_verdicts_persists_once():
+    from discuss_agent.claims import Claim, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims = {
+        "X": Claim("X", "OPEN"),
+        "Y": Claim("Y", "OPEN"),
+    }
+    mgr.save = MagicMock()
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr,
+        [
+            {"claim": "X", "verdict": "CLOSED:共识", "reason": "ok"},
+            {"claim": "Y", "verdict": "CLOSED:分歧", "reason": "recorded"},
+        ],
+        {"X", "Y"},
+        round_num=2,
+    )
+
+    assert len(accepted) == 2
+    assert rejected == []
+    mgr.save.assert_called_once_with()
 
 
 def test_host_verdicts_reject_non_string_fields_without_crashing():
@@ -192,12 +320,109 @@ def test_host_verdicts_reject_non_string_fields_without_crashing():
     ]
 
 
+def test_continue_verdict_requires_nonempty_targeted_evidence_request():
+    from discuss_agent.claims import Claim, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims = {
+        "X": Claim("X", "OPEN"),
+        "Y": Claim("Y", "OPEN"),
+    }
+    verdicts = [
+        {
+            "claim": "X",
+            "verdict": "CONTINUE",
+            "reason": "evidence gap",
+            "missing": "",
+            "needs_agents": ["A"],
+        },
+        {
+            "claim": "Y",
+            "verdict": "CONTINUE",
+            "reason": "counterexample review",
+            "missing": "review counterexample",
+            "needs_agents": [],
+        },
+    ]
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr, verdicts, {"X", "Y"}, round_num=1,
+    )
+
+    assert accepted == []
+    assert [item["reason"] for item in rejected] == [
+        "missing field must be non-empty",
+        "needs_agents must be non-empty",
+        "missing verdict",
+        "missing verdict",
+    ]
+    assert all(claim.status == "OPEN" for claim in mgr.claims.values())
+    assert mgr._host_request(mgr.claims["X"]) == (
+        {"A", "B"}, "Host未返回有效定向裁决；需要重新审阅并补充缺失证据",
+    )
+    assert mgr._host_request(mgr.claims["Y"]) == (
+        {"A", "B"}, "Host未返回有效定向裁决；需要重新审阅并补充缺失证据",
+    )
+    assert mgr._host_routing(mgr.claims["X"])["allow_unknown_progress"] is False
+    assert mgr._host_routing(mgr.claims["Y"])["allow_unknown_progress"] is False
+
+
+@pytest.mark.parametrize("allow_unknown", [None, "false", 0])
+def test_continue_verdict_requires_explicit_boolean_unknown_policy(
+    allow_unknown,
+):
+    from discuss_agent.claims import Claim, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims["X"] = Claim("X", "OPEN")
+    verdict = {
+        "claim": "X",
+        "verdict": "CONTINUE",
+        "reason": "evidence gap",
+        "missing": "source",
+        "needs_agents": ["A"],
+    }
+    if allow_unknown is not None:
+        verdict["allow_unknown_progress"] = allow_unknown
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr, [verdict], {"X"}, round_num=1,
+    )
+
+    assert accepted == []
+    assert rejected[0]["reason"] == "invalid allow_unknown_progress"
+    assert mgr.claims["X"].status == "OPEN"
+
+
+@pytest.mark.parametrize("reason", ["", "   ", ["not", "text"]])
+def test_closed_verdict_requires_nonempty_reason_and_falls_back_open(reason):
+    from discuss_agent.claims import Claim, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims["X"] = Claim("X", "OPEN")
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr,
+        [{"claim": "X", "verdict": "CLOSED:共识", "reason": reason}],
+        {"X"},
+        round_num=1,
+    )
+
+    assert accepted == []
+    assert rejected[0]["reason"] == "reason must be a non-empty string"
+    assert mgr.claims["X"].status == "OPEN"
+    assert mgr._host_request(mgr.claims["X"])[0] == {"A", "B"}
+
+
 @patch("discuss_agent.engine.generate_usage_summary")
 @patch("discuss_agent.engine.AuditLogger")
 @patch("discuss_agent.engine.Archiver")
 @patch("discuss_agent.engine.ContextManager")
 @patch("discuss_agent.engine.AgentConversation")
-async def test_host_partially_closes_mature_claim_while_new_claim_remains_open(
+async def test_host_semantically_continues_new_claim_while_closing_sufficient_claims(
     MockConversation, MockContext, MockArchiver, MockAudit, _summary,
 ):
     from discuss_agent.engine import DiscussionEngine
@@ -230,18 +455,37 @@ async def test_host_partially_closes_mature_claim_while_new_claim_remains_open(
     engine = DiscussionEngine(config)
     judged = []
 
-    async def judge(mgr, _round):
-        mature = [claim.keyword for claim in mgr.get_mature_claims({"A", "B"})]
-        judged.extend(mature)
+    async def judge(mgr, round_num):
+        candidates = [claim.keyword for claim in mgr.get_host_candidates()]
+        judged.extend(candidates)
+        if round_num == 1:
+            return [
+                {
+                    "claim": keyword,
+                    "verdict": "CONTINUE",
+                    "reason": "cross-review",
+                    "missing": "peer review",
+                    "needs_agents": ["B" if keyword == "old" else "A"],
+                    "allow_unknown_progress": False,
+                }
+                for keyword in candidates
+            ]
         return [
-            {"claim": keyword, "verdict": "CLOSED:共识", "reason": "ok"}
-            for keyword in mature
+            {
+                "claim": keyword,
+                "verdict": "CONTINUE" if keyword == "new" else "CLOSED:共识",
+                "reason": "new evidence needs review" if keyword == "new" else "ok",
+                "missing": "B review" if keyword == "new" else "",
+                "needs_agents": ["B"] if keyword == "new" else [],
+                "allow_unknown_progress": False,
+            }
+            for keyword in candidates
         ]
 
     engine._host_judge = AsyncMock(side_effect=judge)
     result = await engine.run()
 
-    assert set(judged) == {"old", "peer"}
+    assert set(judged) == {"old", "peer", "new"}
     assert result.converged is False
     assert result.remaining_disputes == ["new"]
 
@@ -251,7 +495,7 @@ async def test_host_partially_closes_mature_claim_while_new_claim_remains_open(
 @patch("discuss_agent.engine.Archiver")
 @patch("discuss_agent.engine.ContextManager")
 @patch("discuss_agent.engine.AgentConversation")
-async def test_three_agents_partial_close_is_not_blocked_by_same_round_new_claim(
+async def test_host_can_close_same_round_claim_without_all_agents_responding(
     MockConversation, MockContext, MockArchiver, MockAudit, _summary,
 ):
     from discuss_agent.engine import DiscussionEngine
@@ -283,21 +527,34 @@ async def test_three_agents_partial_close_is_not_blocked_by_same_round_new_claim
 
     MockConversation.side_effect = conversation
     engine = DiscussionEngine(config)
-    engine._host_judge = AsyncMock(return_value=[
-        {"claim": "old", "verdict": "CLOSED:共识", "reason": "ok"},
-        {"claim": "new", "verdict": "CLOSED:共识", "reason": "too early"},
+    engine._host_judge = AsyncMock(side_effect=[
+        [{
+            "claim": "old",
+            "verdict": "CONTINUE",
+            "reason": "review needed",
+            "missing": "peer review",
+            "needs_agents": ["B"],
+            "allow_unknown_progress": False,
+        }],
+        [
+            {"claim": "old", "verdict": "CLOSED:共识", "reason": "ok"},
+            {"claim": "new", "verdict": "CLOSED:共识", "reason": "sufficient"},
+        ],
     ])
 
     result = await engine.run()
 
-    assert result.remaining_disputes == ["new"]
+    assert result.converged is True
+    assert result.remaining_disputes == []
     host_record = [
         call.args[2]
         for call in archiver.save_round.call_args_list
         if call.args[1] == "host"
-    ][0]
-    assert host_record["accepted_verdicts"][0]["claim"] == "old"
-    assert host_record["rejected_verdicts"][0]["claim"] == "new"
+    ][-1]
+    assert {
+        item["claim"] for item in host_record["accepted_verdicts"]
+    } == {"old", "new"}
+    assert host_record["rejected_verdicts"] == []
 
 
 @pytest.mark.parametrize("strict", [True, False])
