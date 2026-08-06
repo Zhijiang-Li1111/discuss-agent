@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,12 +22,15 @@ class ClaimEntry:
     def format(self) -> str:
         """Render this entry as a tagged line for claims.md."""
         if self.entry_type == "HOST":
-            return f"[HOST @R{self.round_num}] {self.content}"
-        prefix = self.entry_type
-        if prefix == "FROM":
-            return f"[FROM:{self.agent_name} @R{self.round_num}] {self.content}"
-        # REBUTTAL, ACCEPT, RESPONSE
-        return f"[{prefix} FROM:{self.agent_name} @R{self.round_num}] {self.content}"
+            tag = f"[HOST @R{self.round_num}]"
+        elif self.entry_type == "FROM":
+            tag = f"[FROM:{self.agent_name} @R{self.round_num}]"
+        else:
+            tag = f"[{self.entry_type} FROM:{self.agent_name} @R{self.round_num}]"
+        lines = self.content.split("\n")
+        return f"{tag} {lines[0]}" + "".join(
+            f"\n    {line}" for line in lines[1:]
+        )
 
 
 @dataclass
@@ -56,6 +62,7 @@ _ENTRY_RE = re.compile(
     r"^\s*\[(?:(\w+)\s+)?FROM:(.+?)\s+@R(\d+)\]\s*(.*)$"
 )
 _HOST_ENTRY_RE = re.compile(r"^\s*\[HOST\s+@R(\d+)\]\s*(.*)$")
+_UNMATCHED_HEADER = "##UNMATCHED_RESPONSES##"
 
 # Regex for parsing agent outputs
 _REBUTTAL_RE = re.compile(r"\[REBUTTAL\s+TO:(.+?)\]\s*(.*)", re.DOTALL)
@@ -131,13 +138,52 @@ class ClaimsManager:
         normalized = target.strip()
         if normalized in known_targets:
             return [normalized], []
-        parts = [part.strip() for part in re.split(r"[、,，;；]", normalized) if part.strip()]
-        if len(parts) <= 1:
-            return [], [normalized]
-        return (
-            [part for part in parts if part in known_targets],
-            [part for part in parts if part not in known_targets],
-        )
+
+        separators = "、,，;；"
+        ordered_targets = sorted(known_targets, key=len, reverse=True)
+        matched: list[str] = []
+        unmatched: list[str] = []
+        buffer: list[str] = []
+        position = 0
+        at_boundary = True
+
+        def flush_buffer() -> None:
+            value = "".join(buffer).strip()
+            if value:
+                unmatched.append(value)
+            buffer.clear()
+
+        while position < len(normalized):
+            candidate = None
+            if at_boundary:
+                candidate = next(
+                    (
+                        keyword for keyword in ordered_targets
+                        if normalized.startswith(keyword, position)
+                        and (
+                            position + len(keyword) == len(normalized)
+                            or normalized[position + len(keyword)] in separators
+                        )
+                    ),
+                    None,
+                )
+            if candidate:
+                flush_buffer()
+                matched.append(candidate)
+                position += len(candidate)
+                at_boundary = False
+                continue
+            char = normalized[position]
+            if char in separators:
+                flush_buffer()
+                at_boundary = True
+            else:
+                buffer.append(char)
+                if not char.isspace():
+                    at_boundary = False
+            position += 1
+        flush_buffer()
+        return list(dict.fromkeys(matched)), list(dict.fromkeys(unmatched))
 
     def parse_claims_file(self) -> None:
         """Parse an existing claims.md file into memory."""
@@ -149,9 +195,11 @@ class ClaimsManager:
     def _parse_text(self, text: str) -> None:
         """Parse claims.md content into structured data."""
         self.claims.clear()
+        self.unmatched_responses.clear()
         current_claim: Claim | None = None
         multiline_buffer: list[str] = []
         pending_entry_meta: tuple | None = None  # (entry_type, agent, round)
+        parsing_unmatched = False
 
         def _flush_multiline():
             nonlocal pending_entry_meta, multiline_buffer
@@ -166,6 +214,25 @@ class ClaimsManager:
             pending_entry_meta = None
 
         for line in text.split("\n"):
+            if line == _UNMATCHED_HEADER:
+                _flush_multiline()
+                current_claim = None
+                parsing_unmatched = True
+                continue
+            if parsing_unmatched:
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict):
+                    self.unmatched_responses.append(item)
+                continue
+            if pending_entry_meta and line.startswith("    "):
+                multiline_buffer.append(line[4:])
+                continue
+
             # Check for topic
             if line.startswith("## 议题"):
                 continue
@@ -217,6 +284,19 @@ class ClaimsManager:
                 multiline_buffer.append(line)
 
         _flush_multiline()
+        claim_round = max(
+            (
+                entry.round_num
+                for claim in self.claims.values()
+                for entry in claim.entries
+            ),
+            default=0,
+        )
+        unmatched_round = max(
+            (int(item["round_num"]) for item in self.unmatched_responses),
+            default=0,
+        )
+        self.current_round = max(claim_round, unmatched_round)
 
     def merge_round(self, agent_outputs: list[AgentOutput]) -> None:
         """Merge all agent outputs from a round into the claims structure.
@@ -226,6 +306,15 @@ class ClaimsManager:
         for output in agent_outputs:
             for response in output.parsed:
                 if response.response_type == "NEW_CLAIM":
+                    if response.target in self.claims:
+                        self.unmatched_responses.append({
+                            "agent_name": output.agent_name,
+                            "round_num": output.round_num,
+                            "response_type": "DUPLICATE_NEW_CLAIM",
+                            "target": response.target,
+                            "content": response.content,
+                        })
+                        continue
                     # Create new claim with FROM tag
                     claim = Claim(
                         keyword=response.target,
@@ -274,19 +363,83 @@ class ClaimsManager:
         )
 
     def get_mature_claims(self, all_agent_names: set[str]) -> list[Claim]:
-        """Return OPEN claims every expected peer has answered at least once."""
-        mature: list[Claim] = []
-        for claim in self.get_open_claims():
-            proposer = self.proposer_for(claim)
-            expected = all_agent_names - {proposer} if proposer else all_agent_names
-            responding = {
-                entry.agent_name
-                for entry in claim.entries
-                if entry.entry_type in {"ACCEPT", "REBUTTAL", "RESPONSE"}
+        """Return OPEN claims with every currently required response present."""
+        return [
+            claim for claim in self.get_open_claims()
+            if not self.agents_needing_response(claim, all_agent_names)
+        ]
+
+    def agents_needing_response(
+        self, claim: Claim, all_agent_names: set[str],
+    ) -> set[str]:
+        """Return agents that must respond after the latest substantive event."""
+        proposer = self.proposer_for(claim)
+        initial = next(
+            (entry for entry in claim.entries if entry.entry_type == "FROM"),
+            None,
+        )
+        responses = [
+            entry for entry in claim.entries
+            if entry.entry_type in {"ACCEPT", "REBUTTAL", "RESPONSE"}
+        ]
+        triggers = [
+            entry for entry in claim.entries
+            if entry.entry_type == "REBUTTAL"
+            or (
+                entry.entry_type == "HOST"
+                and entry.content.startswith("CONTINUE：")
+            )
+        ]
+
+        if not triggers:
+            required = all_agent_names - ({proposer} if proposer else set())
+            initial_round = initial.round_num if initial else -1
+            responded = {
+                entry.agent_name for entry in responses
+                if entry.round_num > initial_round
             }
-            if expected.issubset(responding):
-                mature.append(claim)
-        return mature
+            return required - responded
+
+        latest_round = max(entry.round_num for entry in triggers)
+        latest = [entry for entry in triggers if entry.round_num == latest_round]
+        if any(entry.entry_type == "HOST" for entry in latest):
+            required = set(all_agent_names)
+            responded = {
+                entry.agent_name for entry in responses
+                if entry.round_num > latest_round
+            }
+        else:
+            rebutters = {entry.agent_name for entry in latest}
+            required = set(all_agent_names)
+            responded = (rebutters if len(rebutters) == 1 else set()) | {
+                entry.agent_name for entry in responses
+                if entry.round_num > latest_round
+            }
+        return required - responded
+
+    @staticmethod
+    def _format_response_context(claim: Claim) -> str:
+        """Render the original claim plus entries in the latest dispute epoch."""
+        initial = next(
+            (entry for entry in claim.entries if entry.entry_type == "FROM"),
+            None,
+        )
+        triggers = [
+            entry for entry in claim.entries
+            if entry.entry_type == "REBUTTAL"
+            or (
+                entry.entry_type == "HOST"
+                and entry.content.startswith("CONTINUE：")
+            )
+        ]
+        entries = [initial] if initial else []
+        if triggers:
+            latest_round = max(entry.round_num for entry in triggers)
+            entries.extend(
+                entry for entry in claim.entries
+                if entry is not initial and entry.round_num >= latest_round
+            )
+        return Claim(claim.keyword, claim.status, entries).format()
 
     def close_claim(self, keyword: str, verdict: str, reason: str, round_num: int) -> None:
         """Host closes a claim with a verdict."""
@@ -300,6 +453,20 @@ class ClaimsManager:
             round_num=round_num,
             content=f"裁决：{reason}",
         ))
+        self.save()
+
+    def continue_claim(self, keyword: str, reason: str, round_num: int) -> None:
+        """Record a Host CONTINUE decision and reopen responses for all agents."""
+        claim = self.claims.get(keyword)
+        if claim is None or claim.status != "OPEN":
+            return
+        claim.add_entry(ClaimEntry(
+            entry_type="HOST",
+            agent_name="HOST",
+            round_num=round_num,
+            content=f"CONTINUE：{reason}",
+        ))
+        self.current_round = max(self.current_round, round_num)
         self.save()
 
     def generate_update_prompt(
@@ -336,25 +503,29 @@ class ClaimsManager:
 
             if claim.status == "OPEN":
                 proposer = self.proposer_for(claim)
-                has_responded = agent_name is not None and any(
-                    entry.agent_name == agent_name
-                    and entry.entry_type in {"ACCEPT", "REBUTTAL", "RESPONSE"}
-                    for entry in claim.entries
+                needs_response = (
+                    agent_name in self.agents_needing_response(
+                        claim, all_agent_names,
+                    )
+                    if agent_name is not None and all_agent_names is not None
+                    else False
                 )
                 if agent_name is None:
                     needs_response_text.append(claim.format())
+                elif needs_response:
+                    needs_response_text.append(self._format_response_context(claim))
                 elif claim.keyword in mature_keywords:
                     awaiting_host.append(f"- CLAIM:{claim.keyword}")
                 elif agent_name == proposer and not any(
                     entry.entry_type == "REBUTTAL" for entry in claim.entries
                 ):
                     awaiting_host.append(f"- CLAIM:{claim.keyword}（你提出；暂无反驳）")
-                elif has_responded:
-                    awaiting_host.append(f"- CLAIM:{claim.keyword}（你已回应）")
                 else:
-                    needs_response_text.append(claim.format())
+                    awaiting_host.append(f"- CLAIM:{claim.keyword}（你已回应）")
                 if has_recent_new and len(claim.entries) == 1:
                     status_changes.append(f"- [新增] CLAIM:{claim.keyword}")
+                if has_recent_host:
+                    status_changes.append(f"- [继续讨论] CLAIM:{claim.keyword}")
             elif has_recent_host:
                 status_changes.append(
                     f"- [已关闭] CLAIM:{claim.keyword} — {claim.status}"
@@ -423,7 +594,18 @@ class ClaimsManager:
         p = Path(self.claims_file)
         p.parent.mkdir(parents=True, exist_ok=True)
         text = self.format_file()
-        p.write_text(text, encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=p.parent,
+            prefix=f".{p.name}.",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(text)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+            temp_name = temp_file.name
+        os.replace(temp_name, p)
 
     def format_file(self) -> str:
         """Render the full claims.md content."""
@@ -433,4 +615,10 @@ class ClaimsManager:
         parts.append("---\n")
         for claim in self.claims.values():
             parts.append(claim.format())
+        if self.unmatched_responses:
+            parts.append(_UNMATCHED_HEADER)
+            parts.extend(
+                json.dumps(item, ensure_ascii=False, sort_keys=True)
+                for item in self.unmatched_responses
+            )
         return "\n".join(parts)

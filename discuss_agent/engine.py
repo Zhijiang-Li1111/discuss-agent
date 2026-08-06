@@ -380,6 +380,63 @@ class DiscussionEngine:
                     continue
         return []
 
+    def _apply_host_verdicts(
+        self,
+        claims_mgr: ClaimsManager,
+        verdicts: list[dict],
+        mature_keywords: set[str],
+        round_num: int,
+    ) -> tuple[list[dict], list[dict]]:
+        """Apply only one valid verdict for each claim offered to the Host."""
+        accepted: list[dict] = []
+        rejected: list[dict] = []
+        seen: set[str] = set()
+        valid_verdicts = {"CLOSED:共识", "CLOSED:分歧", "CONTINUE"}
+
+        for item in verdicts:
+            verdict = item if isinstance(item, dict) else {}
+            keyword = verdict.get("claim", "")
+            decision = verdict.get("verdict", "")
+            rejection_reason = ""
+            if not isinstance(keyword, str):
+                rejection_reason = "invalid claim field"
+            elif not isinstance(decision, str):
+                rejection_reason = "invalid verdict field"
+            elif keyword in seen:
+                rejection_reason = "duplicate verdict"
+            elif keyword not in mature_keywords:
+                rejection_reason = "claim was not in the mature set"
+            elif decision not in valid_verdicts:
+                rejection_reason = "invalid verdict"
+
+            if rejection_reason:
+                rejected.append({
+                    **verdict,
+                    "host_reason": verdict.get("reason", ""),
+                    "reason": rejection_reason,
+                })
+                continue
+
+            seen.add(keyword)
+            reason = verdict.get("reason", "")
+            if decision == "CONTINUE":
+                claims_mgr.continue_claim(keyword, reason, round_num)
+            else:
+                claims_mgr.close_claim(
+                    keyword, decision.removeprefix("CLOSED:"), reason, round_num,
+                )
+            accepted.append(verdict)
+
+        for keyword in sorted(mature_keywords - seen):
+            rejected.append({
+                "claim": keyword,
+                "verdict": None,
+                "host_reason": "",
+                "reason": "missing verdict",
+            })
+
+        return accepted, rejected
+
     async def _host_summarize(
         self, claims_mgr: ClaimsManager, round_num: int | None = None,
     ) -> str:
@@ -447,15 +504,21 @@ class DiscussionEngine:
 
                 if precondition_met:
                     # Ask host to judge
+                    mature_keywords = {
+                        claim.keyword
+                        for claim in claims_mgr.get_mature_claims(
+                            {ac.name for ac in self._config.agents},
+                        )
+                    }
                     verdicts = await self._host_judge(claims_mgr, round_num)
-                    for v in verdicts:
-                        kw = v.get("claim", "")
-                        verdict = v.get("verdict", "CONTINUE")
-                        reason = v.get("reason", "")
-                        if verdict.startswith("CLOSED"):
-                            verdict_type = verdict.replace("CLOSED:", "")
-                            claims_mgr.close_claim(kw, verdict_type, reason, round_num)
-                    self._archiver.save_round(round_num, "host", {"verdicts": verdicts})
+                    accepted, rejected = self._apply_host_verdicts(
+                        claims_mgr, verdicts, mature_keywords, round_num,
+                    )
+                    self._archiver.save_round(round_num, "host", {
+                        "verdicts": verdicts,
+                        "accepted_verdicts": accepted,
+                        "rejected_verdicts": rejected,
+                    })
 
                 # Check if all claims are closed
                 if not claims_mgr.get_open_claims():

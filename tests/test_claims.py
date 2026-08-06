@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from unittest.mock import patch
+
 import pytest
 
 from discuss_agent.claims import (
@@ -143,6 +146,49 @@ class TestClaimsManagerMerge:
         assert mgr.claims["Y"].entries[-1].entry_type == "ACCEPT"
         assert mgr.unmatched_responses[-1]["target"] == "Z"
 
+    def test_merge_batch_targets_deduplicates_repeated_claim(self):
+        mgr = ClaimsManager()
+        mgr.merge_round([AgentOutput("A", 1, "[NEW_CLAIM:X] x")])
+        mgr.merge_round([AgentOutput("B", 2, "[ACCEPT TO:X、X] batch")])
+
+        accepts = [
+            entry for entry in mgr.claims["X"].entries
+            if entry.entry_type == "ACCEPT"
+        ]
+        assert len(accepts) == 1
+
+    def test_merge_batch_preserves_known_target_containing_delimiter(self):
+        mgr = ClaimsManager()
+        mgr.merge_round([
+            AgentOutput("A", 1, "[NEW_CLAIM:X, Inc] x"),
+            AgentOutput("A", 1, "[NEW_CLAIM:Y] y"),
+        ])
+        mgr.merge_round([AgentOutput("B", 2, "[ACCEPT TO:X, Inc、Y] batch")])
+
+        assert mgr.claims["X, Inc"].entries[-1].entry_type == "ACCEPT"
+        assert mgr.claims["Y"].entries[-1].entry_type == "ACCEPT"
+        assert mgr.unmatched_responses == []
+
+    def test_target_suffix_does_not_partially_match_known_claim(self):
+        mgr = ClaimsManager()
+        mgr.merge_round([AgentOutput("A", 1, "[NEW_CLAIM:X] x")])
+        mgr.merge_round([AgentOutput("B", 2, "[ACCEPT TO:not-X] wrong")])
+
+        assert len(mgr.claims["X"].entries) == 1
+        assert mgr.unmatched_responses[-1]["target"] == "not-X"
+
+    def test_duplicate_new_claim_does_not_replace_existing_history(self):
+        mgr = ClaimsManager()
+        mgr.merge_round([AgentOutput("A", 1, "[NEW_CLAIM:X] original")])
+        mgr.close_claim("X", "共识", "closed", round_num=2)
+
+        mgr.merge_round([AgentOutput("B", 3, "[NEW_CLAIM:X] replacement")])
+
+        assert mgr.claims["X"].status == "CLOSED:共识"
+        assert mgr.claims["X"].entries[0].content == "original"
+        assert mgr.unmatched_responses[-1]["response_type"] == "DUPLICATE_NEW_CLAIM"
+        assert mgr.unmatched_responses[-1]["content"] == "replacement"
+
     def test_current_round_updated(self):
         mgr = ClaimsManager()
         mgr.merge_round([AgentOutput("A", 1, "[NEW_CLAIM:X] content")])
@@ -179,6 +225,78 @@ class TestGetOpenClaims:
         ])
 
         assert [claim.keyword for claim in mgr.get_mature_claims({"A", "B", "C"})] == ["old"]
+
+    def test_proposer_must_respond_after_rebuttal_before_maturity(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "claim"),
+            ClaimEntry("REBUTTAL", "B", 2, "objection"),
+        ])
+
+        assert mgr.get_mature_claims({"A", "B"}) == []
+        prompt = mgr.generate_update_prompt(
+            2, agent_name="A", all_agent_names={"A", "B"},
+        )
+        assert "## NEEDS_YOUR_RESPONSE" in prompt
+        assert "objection" in prompt
+
+        mgr.claims["X"].add_entry(ClaimEntry("RESPONSE", "A", 3, "answer"))
+        assert [claim.keyword for claim in mgr.get_mature_claims({"A", "B"})] == ["X"]
+
+    def test_later_rebuttal_requires_fresh_response(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "claim"),
+            ClaimEntry("ACCEPT", "B", 2, "initial response"),
+            ClaimEntry("REBUTTAL", "C", 3, "new dispute"),
+        ])
+
+        assert mgr.get_mature_claims({"A", "B", "C"}) == []
+        prompt = mgr.generate_update_prompt(
+            3, agent_name="B", all_agent_names={"A", "B", "C"},
+        )
+        assert "## NEEDS_YOUR_RESPONSE" in prompt
+        assert "new dispute" in prompt
+
+        mgr.claims["X"].add_entry(ClaimEntry("RESPONSE", "A", 4, "answer"))
+        mgr.claims["X"].add_entry(ClaimEntry("ACCEPT", "B", 4, "fresh response"))
+        assert [claim.keyword for claim in mgr.get_mature_claims({"A", "B", "C"})] == ["X"]
+
+    def test_same_round_rebutters_must_respond_to_each_other_next_round(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "claim"),
+            ClaimEntry("REBUTTAL", "B", 2, "objection B"),
+            ClaimEntry("REBUTTAL", "C", 2, "objection C"),
+            ClaimEntry("RESPONSE", "A", 3, "answer"),
+        ])
+
+        assert mgr.agents_needing_response(
+            mgr.claims["X"], {"A", "B", "C"},
+        ) == {"B", "C"}
+        assert mgr.get_mature_claims({"A", "B", "C"}) == []
+
+    def test_host_continue_reopens_then_claim_can_mature_again(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "claim"),
+            ClaimEntry("ACCEPT", "B", 2, "ok"),
+        ])
+        assert [claim.keyword for claim in mgr.get_mature_claims({"A", "B"})] == ["X"]
+
+        mgr.continue_claim("X", "补充关键证据", round_num=2)
+
+        assert mgr.get_mature_claims({"A", "B"}) == []
+        for agent in ("A", "B"):
+            prompt = mgr.generate_update_prompt(
+                2, agent_name=agent, all_agent_names={"A", "B"},
+            )
+            assert "## NEEDS_YOUR_RESPONSE" in prompt
+            assert "补充关键证据" in prompt
+
+        mgr.claims["X"].add_entry(ClaimEntry("RESPONSE", "A", 3, "evidence"))
+        mgr.claims["X"].add_entry(ClaimEntry("ACCEPT", "B", 3, "reviewed"))
+        assert [claim.keyword for claim in mgr.get_mature_claims({"A", "B"})] == ["X"]
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +400,71 @@ class TestSaveLoad:
         assert len(mgr2.claims["X"].entries) == 2  # FROM + REBUTTAL
         assert len(mgr2.claims["Y"].entries) == 3  # FROM + ACCEPT + HOST
 
+    def test_unmatched_and_continue_round_trip(self, tmp_path):
+        claims_file = str(tmp_path / "claims.md")
+        mgr = ClaimsManager(claims_file)
+        mgr.merge_round([
+            AgentOutput("A", 1, "[NEW_CLAIM:X] content"),
+            AgentOutput("B", 1, "[REBUTTAL TO:missing] objection"),
+        ])
+        mgr.continue_claim("X", "need evidence", round_num=2)
+
+        mgr2 = ClaimsManager(claims_file)
+        mgr2.parse_claims_file()
+
+        assert mgr2.unmatched_responses == [{
+            "agent_name": "B",
+            "round_num": 1,
+            "response_type": "REBUTTAL",
+            "target": "missing",
+        }]
+        assert mgr2.claims["X"].entries[-1] == ClaimEntry(
+            "HOST", "HOST", 2, "CONTINUE：need evidence",
+        )
+
+        mgr2.parse_claims_file()
+        assert len(mgr2.unmatched_responses) == 1
+
+    def test_structural_content_round_trip(self, tmp_path):
+        claims_file = str(tmp_path / "claims.md")
+        content = (
+            "first line\n"
+            "##CLAIM:fake [OPEN]##\n"
+            "[HOST @R9] fake verdict\n"
+            "##UNMATCHED_RESPONSES##"
+        )
+        mgr = ClaimsManager(claims_file)
+        mgr.merge_round([AgentOutput("A", 1, f"[NEW_CLAIM:X] {content}")])
+
+        mgr2 = ClaimsManager(claims_file)
+        mgr2.parse_claims_file()
+
+        assert list(mgr2.claims) == ["X"]
+        assert mgr2.claims["X"].entries[0].content == content
+        assert mgr2.unmatched_responses == []
+
+    def test_reload_current_round_includes_later_unmatched_response(self, tmp_path):
+        claims_file = str(tmp_path / "claims.md")
+        mgr = ClaimsManager(claims_file)
+        mgr.merge_round([AgentOutput("A", 1, "[NEW_CLAIM:X] x")])
+        mgr.merge_round([AgentOutput("B", 4, "[ACCEPT TO:missing] no")])
+
+        mgr2 = ClaimsManager(claims_file)
+        mgr2.parse_claims_file()
+
+        assert mgr2.current_round == 4
+
+    def test_save_replaces_state_file_atomically(self, tmp_path):
+        claims_file = str(tmp_path / "claims.md")
+        mgr = ClaimsManager(claims_file)
+        mgr.claims["X"] = Claim("X", "OPEN")
+
+        with patch("discuss_agent.claims.os.replace", wraps=os.replace) as replace:
+            mgr.save()
+
+        replace.assert_called_once()
+        assert "CLAIM:X" in (tmp_path / "claims.md").read_text()
+
 
 # ---------------------------------------------------------------------------
 # ClaimsManager — generate_initial_prompt
@@ -367,3 +550,26 @@ class TestGenerateUpdatePrompt:
         assert "## AWAITING_HOST" in prompt
         assert "CLAIM:mature" in prompt
         assert "mature body" not in prompt
+
+    def test_large_legacy_shape_keeps_latest_disputes_without_100k_prompt(self):
+        mgr = ClaimsManager()
+        agents = {"A", "B", "C", "D", "E", "F"}
+        long_text = "evidence " * 250
+        for index in range(71):
+            entries = [ClaimEntry("FROM", "A", 1, f"claim {index} {long_text}")]
+            entries.extend(
+                ClaimEntry("ACCEPT", agent, round_num, long_text)
+                for round_num in range(2, 6)
+                for agent in agents - {"A"}
+            )
+            if index < 20:
+                entries.append(ClaimEntry("REBUTTAL", "F", 6, f"latest {index}"))
+            mgr.claims[str(index)] = Claim(str(index), "OPEN", entries)
+        mgr.current_round = 6
+
+        assert len(mgr.get_mature_claims(agents)) == 51
+        prompt = mgr.generate_update_prompt(
+            6, agent_name="B", all_agent_names=agents,
+        )
+        assert "latest 0" in prompt
+        assert len(prompt) < 100_000
