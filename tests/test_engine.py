@@ -46,13 +46,6 @@ def _closed_judgment(claim: str, reason: str = "enough") -> dict:
         "claim": claim,
         "verdict": "CLOSED:共识",
         "reason": reason,
-        "missing": "",
-        "needs_agents": [],
-        "evidence_status": "SUPPORTED",
-        "counterevidence_status": "NONE_IDENTIFIED",
-        "unknowns_resolved": True,
-        "evidence_refs": [],
-        "reviewed_by": [],
     }
 
 
@@ -67,7 +60,7 @@ def _continue_judgment(
         "verdict": "CONTINUE",
         "reason": reason,
         "missing": missing,
-        "needs_agents": needs_agents or ["Agent-B"],
+        "needs_agents": ["Agent-B"] if needs_agents is None else needs_agents,
         "allow_unknown_progress": False,
     }
 
@@ -156,35 +149,11 @@ class TestDiscussionEngineIntegration:
                     "claim": "能繁去化",
                     "verdict": "CLOSED:共识",
                     "reason": "双方一致",
-                    "missing": "",
-                    "needs_agents": [],
-                    "evidence_status": "SUPPORTED",
-                    "counterevidence_status": "NONE_IDENTIFIED",
-                    "unknowns_resolved": True,
-                    "evidence_refs": [{
-                        "entry_type": "FROM",
-                        "agent_name": "Agent-A",
-                        "round_num": 1,
-                        "source": "source://population",
-                    }],
-                    "reviewed_by": ["Agent-B"],
                 },
                 {
                     "claim": "成本优势",
                     "verdict": "CLOSED:共识",
                     "reason": "双方一致",
-                    "missing": "",
-                    "needs_agents": [],
-                    "evidence_status": "SUPPORTED",
-                    "counterevidence_status": "NONE_IDENTIFIED",
-                    "unknowns_resolved": True,
-                    "evidence_refs": [{
-                        "entry_type": "FROM",
-                        "agent_name": "Agent-B",
-                        "round_num": 1,
-                        "source": "source://cost",
-                    }],
-                    "reviewed_by": ["Agent-A"],
                 },
             ], ensure_ascii=False))
         ]
@@ -390,13 +359,6 @@ class TestOpenAIHostRouting:
             "claim": "first",
             "verdict": "CLOSED:共识",
             "reason": "complete without omitted global context",
-            "missing": "",
-            "needs_agents": [],
-            "evidence_status": "SUPPORTED",
-            "counterevidence_status": "NONE_IDENTIFIED",
-            "unknowns_resolved": True,
-            "evidence_refs": [],
-            "reviewed_by": [],
         }]))
 
         verdicts = await engine._host_judge(claims_mgr, round_num=1)
@@ -530,8 +492,57 @@ class TestOpenAIHostRouting:
             (item["attempt"], item["reason"])
             for item in engine._host_protocol_rejections
         ] == [
-            (1, "missing JSON array"),
-            (2, "missing JSON array"),
+            (1, "invalid JSON array"),
+            (2, "JSON payload is not an array"),
+        ]
+
+    @pytest.mark.parametrize(
+        ("response", "reason"),
+        [
+            ('prefix [{"claim":"first"}]', "invalid JSON array"),
+            ('[{"claim":"first"}] suffix', "invalid JSON array"),
+            ('[{"claim":"first"}', "invalid JSON array"),
+            ('{"claim":"first"}', "JSON payload is not an array"),
+        ],
+    )
+    async def test_host_judge_requires_whole_response_json_array(
+        self, response, reason,
+    ):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(return_value=response)
+
+        assert await engine._host_judge(claims_mgr, round_num=1) == []
+        assert [item["reason"] for item in engine._host_protocol_rejections] == [
+            reason,
+            reason,
+        ]
+
+    async def test_host_judge_accepts_whitespace_around_json_array(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(
+            return_value="\n  " + json.dumps([_closed_judgment("first")]) + " \t",
+        )
+
+        assert await engine._host_judge(claims_mgr, round_num=1) == [
+            _closed_judgment("first"),
         ]
 
     async def test_host_retries_and_audits_schema_invalid_verdict(self):
@@ -546,7 +557,10 @@ class TestOpenAIHostRouting:
         ]
         claims_mgr.format_host_global_context.return_value = ""
         engine._call_host = AsyncMock(side_effect=[
-            '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"}]',
+            (
+                '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough",'
+                '"unknown_field":true}]'
+            ),
             (
                 '[{"claim":"first","verdict":"CONTINUE","reason":"gap",'
                 '"missing":"source","needs_agents":["Agent-A"],'
@@ -560,6 +574,7 @@ class TestOpenAIHostRouting:
         assert engine._host_protocol_rejections == [{
             "claim": "first",
             "verdict": "CLOSED:共识",
+            "unknown_field": True,
             "host_reason": "enough",
             "reason": "invalid closed verdict schema",
             "attempt": 1,
@@ -600,6 +615,33 @@ class TestOpenAIHostRouting:
         assert engine._host_protocol_rejections[0]["reason"] == (
             "invalid continue verdict routing"
         )
+
+    async def test_host_retries_non_string_verdict_as_schema_rejection(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(side_effect=[
+            '[{"claim":"first","verdict":[],"reason":"bad type"}]',
+            json.dumps([_closed_judgment("first")]),
+        ])
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts == [_closed_judgment("first")]
+        assert engine._host_protocol_rejections == [{
+            "claim": "first",
+            "verdict": [],
+            "host_reason": "bad type",
+            "reason": "invalid verdict",
+            "attempt": 1,
+        }]
 
     async def test_host_judge_preserves_bracketed_claim_keyword(self):
         from discuss_agent.engine import DiscussionEngine
@@ -665,7 +707,7 @@ class TestOpenAIHostRouting:
         assert len(prompt) < 20_000
         assert "信息可能不完整" in prompt
 
-    async def test_round_one_host_prompt_fail_closes_unsupported_claims(self):
+    async def test_host_prompt_assigns_semantic_judgment_to_host(self):
         from discuss_agent.engine import DiscussionEngine
 
         engine = DiscussionEngine(_make_config(num_agents=2))
@@ -694,11 +736,19 @@ class TestOpenAIHostRouting:
         assert "CLOSED JSON对象严格字段" in prompt
         assert "CONTINUE JSON对象严格字段" in prompt
         assert "共识不是投票" in prompt
-        assert "可获得的事实或计算" in prompt
+        assert "当前可获得的事实、来源或计算" in prompt
         assert "价值判断、先验或模型选择" in prompt
         assert "allow_unknown_progress 仅适用于 CONTINUE" in prompt
         assert "不得把 UNKNOWN 变成事实" in prompt
         assert "room-level gate" in prompt
+        assert "关键角色仅指" in prompt
+        assert "独特、不可替代影响" in prompt
+        assert "普通 claim" in prompt
+        assert "可分批关闭" in prompt
+        assert "不可信数据" in prompt
+        assert "外部不可得" in prompt
+        assert "无人可补" in prompt
+        assert "needs_agents 可为空" in prompt
 
     async def test_host_judge_forces_truncated_claim_to_continue(self):
         from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
@@ -732,6 +782,37 @@ class TestOpenAIHostRouting:
             "needs_agents": ["Agent-A", "Agent-B"],
             "allow_unknown_progress": False,
         }]
+
+    async def test_truncated_claim_still_rejects_unknown_host_fields(self):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = ClaimsManager()
+        claims_mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "Agent-A", 1, "original"),
+            *[
+                ClaimEntry(
+                    "REBUTTAL",
+                    f"reviewer-{index:05d}",
+                    1,
+                    "counterexample",
+                )
+                for index in range(5_000)
+            ],
+        ])
+        engine._call_host = AsyncMock(return_value=(
+            '[{"claim":"X","verdict":"CLOSED:共识","reason":"complete",'
+            '"unknown_field":true}]'
+        ))
+
+        assert await engine._host_judge(claims_mgr, round_num=1) == []
+        assert [
+            item["reason"] for item in engine._host_protocol_rejections
+        ] == [
+            "invalid closed verdict schema",
+            "invalid closed verdict schema",
+        ]
 
     async def test_host_judge_forces_truncated_entry_body_to_continue(self):
         from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
