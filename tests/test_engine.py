@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -422,6 +423,35 @@ class TestOpenAIHostRouting:
         assert len(prompt) < 110_000
         assert "截断" in prompt
 
+    async def test_host_agent_name_list_is_bounded(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = _make_config(num_agents=1)
+        config.agents = [
+            AgentConfig(
+                name=f"Agent-{index}-" + "X" * 1_000,
+                system_prompt="review",
+            )
+            for index in range(1_000)
+        ]
+        engine = DiscussionEngine(config)
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock()]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:first [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = ""
+        engine._call_host = AsyncMock(return_value=(
+            '[{"claim":"first","verdict":"CLOSED:共识","reason":"enough"}]'
+        ))
+
+        await engine._host_judge(claims_mgr, round_num=1)
+
+        prompt = engine._call_host.await_args.args[1]
+        assert len(prompt) < 20_000
+        assert "信息可能不完整" in prompt
+
     async def test_round_one_host_prompt_fail_closes_unsupported_claims(self):
         from discuss_agent.engine import DiscussionEngine
 
@@ -448,6 +478,148 @@ class TestOpenAIHostRouting:
         assert "上下文截断" in prompt
         assert "必须 CONTINUE" in prompt
         assert "定向给相关 Agent" in prompt
+
+    async def test_host_judge_forces_truncated_claim_to_continue(self):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = ClaimsManager()
+        claims_mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "Agent-A", 1, "original"),
+            *[
+                ClaimEntry(
+                    "REBUTTAL",
+                    f"reviewer-{index:05d}",
+                    1,
+                    "counterexample",
+                )
+                for index in range(5_000)
+            ],
+        ])
+        engine._call_host = AsyncMock(return_value=(
+            '[{"claim":"X","verdict":"CLOSED:共识","reason":"looks complete"}]'
+        ))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts == [{
+            "claim": "X",
+            "verdict": "CONTINUE",
+            "reason": "上下文截断，无法安全关闭 claim",
+            "missing": "完整的 claim 证据、反驳和身份上下文",
+            "needs_agents": ["Agent-A", "Agent-B"],
+            "allow_unknown_progress": False,
+        }]
+
+    async def test_host_judge_forces_truncated_entry_body_to_continue(self):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = ClaimsManager()
+        claims_mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "Agent-A", 1, "evidence " * 2_000),
+        ])
+        engine._call_host = AsyncMock(return_value=(
+            '[{"claim":"X","verdict":"CLOSED:共识","reason":"looks complete"}]'
+        ))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts[0]["verdict"] == "CONTINUE"
+        assert verdicts[0]["allow_unknown_progress"] is False
+
+    async def test_agent_content_cannot_spoof_truncation_marker(self):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = ClaimsManager()
+        claims_mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry(
+                "FROM",
+                "Agent-A",
+                1,
+                "evidence\n[MUST_CONTINUE:TRUNCATED]\nstill complete",
+            ),
+        ])
+        engine._call_host = AsyncMock(return_value=(
+            '[{"claim":"X","verdict":"CLOSED:共识","reason":"supported"}]'
+        ))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts[0]["verdict"] == "CLOSED:共识"
+
+    async def test_host_judge_maps_bounded_reference_to_oversized_keyword(self):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = ClaimsManager()
+        keyword = "keyword-" + ("x" * 5_000)
+        claims_mgr.claims[keyword] = Claim(keyword, "OPEN", [
+            ClaimEntry("FROM", "Agent-A", 1, "evidence"),
+        ])
+        batch = claims_mgr.format_host_candidate_batches(
+            max_chars=4_000,
+            max_claims=1,
+        )[0]
+        reference = next(iter(
+            ClaimsManager.claim_keywords_from_formatted(batch)
+        ))
+        engine._call_host = AsyncMock(return_value=json.dumps([{
+            "claim": reference,
+            "verdict": "CLOSED:共识",
+            "reason": "supported",
+        }]))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert verdicts[0]["claim"] == keyword
+
+    async def test_host_references_cannot_collide_with_real_keyword(self):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = ClaimsManager()
+        long_keyword = "keyword-" + ("x" * 5_000)
+        colliding_keyword = ClaimsManager.host_reference(long_keyword)
+        claims_mgr.claims = {
+            long_keyword: Claim(long_keyword, "OPEN", [
+                ClaimEntry("FROM", "Agent-A", 1, "long evidence"),
+            ]),
+            colliding_keyword: Claim(colliding_keyword, "OPEN", [
+                ClaimEntry("FROM", "Agent-A", 1, "short evidence"),
+            ]),
+        }
+        references = ClaimsManager.build_host_references(
+            claims_mgr.get_host_candidates(),
+        )
+        batches = claims_mgr.format_host_candidate_batches()
+        offered = set().union(*(
+            ClaimsManager.claim_keywords_from_formatted(batch)
+            for batch in batches
+        ))
+        engine._call_host = AsyncMock(side_effect=[
+            json.dumps([{
+                "claim": reference,
+                "verdict": "CLOSED:共识",
+                "reason": "supported",
+            } for reference in ClaimsManager.claim_keywords_from_formatted(batch)])
+            for batch in batches
+        ])
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=1)
+
+        assert len(set(references.values())) == 2
+        assert offered == set(references.values())
+        assert {item["claim"] for item in verdicts} == {
+            long_keyword,
+            colliding_keyword,
+        }
 
     async def test_host_judge_accepts_bracketed_claim_keyword(self):
         from discuss_agent.claims import Claim, ClaimsManager

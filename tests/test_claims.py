@@ -170,6 +170,7 @@ class TestClaimsManagerMerge:
             "round_num": 1,
             "response_type": "REBUTTAL",
             "target": "不存在",
+            "content": "反驳",
         }]
 
     def test_merge_batch_accept_targets_without_silent_loss(self):
@@ -560,6 +561,7 @@ class TestSaveLoad:
             "round_num": 1,
             "response_type": "REBUTTAL",
             "target": "missing",
+            "content": "objection",
         }]
         host_entry = mgr2.claims["X"].entries[-1]
         assert host_entry.entry_type == "HOST"
@@ -1005,6 +1007,22 @@ class TestGenerateUpdatePrompt:
         assert len(batches[0]) <= 4_000
         assert "截断" in batches[0]
 
+    def test_oversized_keyword_keeps_a_machine_readable_host_identity(self):
+        mgr = ClaimsManager()
+        keyword = "keyword-" + ("x" * 5_000)
+        mgr.claims[keyword] = Claim(keyword, "OPEN", [
+            ClaimEntry("FROM", "A", 1, "evidence"),
+        ])
+
+        batches = mgr.format_host_candidate_batches(
+            max_chars=4_000,
+            max_claims=1,
+        )
+
+        assert len(batches) == 1
+        assert len(batches[0]) <= 4_000
+        assert len(ClaimsManager.claim_keywords_from_formatted(batches[0])) == 1
+
     def test_host_global_context_respects_tiny_character_budget(self):
         mgr = ClaimsManager()
         for index in range(20):
@@ -1016,6 +1034,19 @@ class TestGenerateUpdatePrompt:
         context = mgr.format_host_global_context(max_chars=100)
 
         assert len(context) <= 100
+
+    def test_host_global_context_bounds_oversized_keyword_identity(self):
+        mgr = ClaimsManager()
+        keyword = "keyword-" + ("x" * 5_000)
+        mgr.claims[keyword] = Claim(keyword, "OPEN", [
+            ClaimEntry("FROM", "A", 1, "evidence"),
+        ])
+
+        context = mgr.format_host_global_context(max_chars=1_000)
+
+        assert ClaimsManager.host_reference(keyword) in context
+        assert keyword not in context
+        assert "evidence" in context
 
     def test_host_candidate_batch_respects_tiny_character_budget(self):
         mgr = ClaimsManager()
@@ -1140,6 +1171,7 @@ class TestGenerateUpdatePrompt:
 
         assert "记录已省略" in compact
         assert "必须CONTINUE" not in compact
+        assert "MUST_CONTINUE:TRUNCATED" not in compact
         assert compact.count("[FROM:A @R1]") == 1
 
     def test_compacted_long_claim_preserves_latest_entries(self):
@@ -1233,12 +1265,72 @@ class TestGenerateUpdatePrompt:
         assert "超出上下文安全上限" in compact
         assert "必须CONTINUE" in compact
 
+    def test_tiny_rebuttal_block_retains_machine_readable_continue_marker(self):
+        claim = Claim("X", "OPEN", [
+            ClaimEntry("REBUTTAL", f"Agent-{index}", 2, "counterexample")
+            for index in range(100)
+        ])
+
+        compact = ClaimsManager._compact_claim(claim, 50)
+
+        assert len(compact) <= 50
+        assert "MUST_CONTINUE" in compact
+
+    def test_omission_marker_overflow_also_fail_closes(self):
+        claim = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "original"),
+            ClaimEntry("ACCEPT", "B", 1, "old"),
+            ClaimEntry("REBUTTAL", "C", 2, "counterexample"),
+            ClaimEntry("HOST", "HOST", 2, "review"),
+        ])
+
+        compact = ClaimsManager._compact_claim(claim, 80)
+
+        assert len(compact) <= 80
+        assert "MUST_CONTINUE" in compact
+
+    def test_bounded_blocks_caps_oversized_omission_preview(self):
+        blocks = [
+            "small",
+            *[
+                f"##CLAIM:{'X' * 10_000}-{index} [OPEN]##"
+                for index in range(20)
+            ],
+        ]
+
+        bounded = ClaimsManager._bounded_blocks(blocks, 100, "claims")
+
+        assert len("\n".join(bounded)) <= 100
+
     def test_bounded_all_blocks_never_exceeds_budget(self):
         blocks = [f"CLAIM:{index}" for index in range(40_000)]
 
         bounded = ClaimsManager._bounded_all_blocks(blocks, 32_000)
 
         assert len("\n".join(bounded)) <= 32_000
+        assert "MUST_CONTINUE" in "\n".join(bounded)
+
+    def test_tiny_directed_block_shares_fail_close_globally(self):
+        blocks = [f"##CLAIM:X-{index} [OPEN]##\nMISSING:source" for index in range(1_000)]
+
+        bounded = ClaimsManager._bounded_all_blocks(blocks, 32_000)
+        rendered = "\n".join(bounded)
+
+        assert len(rendered) <= 32_000
+        assert "MUST_CONTINUE:TRUNCATED_TARGETED_REQUESTS" in rendered
+
+    def test_long_directed_identity_shares_fail_close_globally(self):
+        blocks = [
+            f"##CLAIM:{'X' * 2_000}-{index} [OPEN]##\nMISSING:source"
+            for index in range(20)
+        ]
+
+        rendered = "\n".join(
+            ClaimsManager._bounded_all_blocks(blocks, 32_000)
+        )
+
+        assert len(rendered) <= 32_000
+        assert "MUST_CONTINUE:TRUNCATED_TARGETED_REQUESTS" in rendered
 
     def test_later_host_request_keeps_previous_round_counterexample(self):
         mgr = ClaimsManager()

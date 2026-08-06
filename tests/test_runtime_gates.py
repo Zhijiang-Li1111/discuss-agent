@@ -417,6 +417,40 @@ def test_closed_verdict_requires_nonempty_reason_and_falls_back_open(reason):
     assert mgr._host_request(mgr.claims["X"])[0] == {"A", "B"}
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"missing": "decisive source"},
+        {"needs_agents": ["A"]},
+        {"missing": 0},
+        {"needs_agents": {}},
+        {"needs_agents": ""},
+    ],
+)
+def test_closed_verdict_rejects_unresolved_evidence_metadata(metadata):
+    from discuss_agent.claims import Claim, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims["X"] = Claim("X", "OPEN")
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr,
+        [{
+            "claim": "X",
+            "verdict": "CLOSED:共识",
+            "reason": "supported",
+            **metadata,
+        }],
+        {"X"},
+        round_num=1,
+    )
+
+    assert accepted == []
+    assert rejected[0]["reason"] == "closed verdict has unresolved evidence"
+    assert mgr.claims["X"].status == "OPEN"
+
+
 @patch("discuss_agent.engine.generate_usage_summary")
 @patch("discuss_agent.engine.AuditLogger")
 @patch("discuss_agent.engine.Archiver")

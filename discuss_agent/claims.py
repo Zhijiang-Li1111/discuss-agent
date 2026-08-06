@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import tempfile
@@ -379,6 +380,7 @@ class ClaimsManager:
                             "round_num": output.round_num,
                             "response_type": response.response_type,
                             "target": target,
+                            "content": response.content,
                         })
         self.current_round = max(
             (o.round_num for o in agent_outputs), default=self.current_round
@@ -409,6 +411,60 @@ class ClaimsManager:
             for line in text.split("\n")
             if (match := _CLAIM_HEADER_RE.match(line))
         }
+
+    @staticmethod
+    def host_reference(keyword: str) -> str:
+        """Return a bounded Host protocol identity for a claim keyword."""
+        if len(f"##CLAIM:{keyword} [OPEN]##") <= 512:
+            return keyword
+        digest = hashlib.sha256(keyword.encode("utf-8")).hexdigest()[:24]
+        return f"@sha256:{digest}"
+
+    @classmethod
+    def build_host_references(cls, claims: list[Claim]) -> dict[str, str]:
+        """Assign unique bounded Host identities without colliding with keywords."""
+        keywords = {claim.keyword for claim in claims}
+        references = {
+            claim.keyword: claim.keyword
+            for claim in claims
+            if cls.host_reference(claim.keyword) == claim.keyword
+        }
+        used = set(references.values())
+        for claim in claims:
+            if claim.keyword in references:
+                continue
+            base = cls.host_reference(claim.keyword)
+            reference = base
+            suffix = 1
+            while reference in keywords or reference in used:
+                reference = f"{base}:{suffix}"
+                suffix += 1
+            references[claim.keyword] = reference
+            used.add(reference)
+        return references
+
+    @staticmethod
+    def truncated_claim_references_from_formatted(text: str) -> set[str]:
+        """Return claim references whose bounded blocks lost required context."""
+        truncated: set[str] = set()
+        current: str | None = None
+        before_entries = False
+        for line in text.splitlines():
+            match = _CLAIM_HEADER_RE.match(line)
+            if match:
+                current = match.group(1).strip()
+                before_entries = True
+            elif current is not None and (
+                _ENTRY_RE.match(line) or _HOST_ENTRY_RE.match(line)
+            ):
+                before_entries = False
+            elif (
+                current is not None
+                and before_entries
+                and line == "[MUST_CONTINUE:TRUNCATED]"
+            ):
+                truncated.add(current)
+        return truncated
 
     @staticmethod
     def _host_request(claim: Claim) -> tuple[set[str], str]:
@@ -466,6 +522,8 @@ class ClaimsManager:
         if len(text) <= limit:
             return text
         marker = "\n...[内容已省略/截断，信息可能不完整]"
+        if limit <= len(marker):
+            return marker[:max(0, limit)]
         return text[: max(0, limit - len(marker))].rstrip() + marker
 
     @staticmethod
@@ -486,10 +544,17 @@ class ClaimsManager:
         )
 
     @classmethod
-    def _compact_claim(cls, claim: Claim, limit: int = 800) -> str:
+    def _compact_claim(
+        cls,
+        claim: Claim,
+        limit: int = 800,
+        *,
+        reference: str | None = None,
+    ) -> str:
         """Keep every claim visible without replaying its full history."""
         if not claim.entries:
-            return f"##CLAIM:{claim.keyword} [{claim.status}]##"
+            reference = reference or cls.host_reference(claim.keyword)
+            return f"##CLAIM:{reference} [{claim.status}]##"
         selected_ids = {
             id(claim.entries[0]),
             *(
@@ -523,11 +588,19 @@ class ClaimsManager:
             entry for entry in claim.entries if id(entry) in selected_ids
         ]
         omitted = len(claim.entries) - len({id(entry) for entry in selected})
-        header = f"##CLAIM:{claim.keyword} [{claim.status}]##"
+        reference = reference or cls.host_reference(claim.keyword)
+        header = f"##CLAIM:{reference} [{claim.status}]##"
+        keyword_preview = ""
+        if reference != claim.keyword:
+            keyword_preview = (
+                "\nKEYWORD_PREVIEW:"
+                + cls._truncate_ends(claim.keyword, 256)
+            )
         omission_marker = ""
         if omitted > 0:
             omission_marker = (
-                f"\n...[中间{omitted}条记录已省略；现有信息不足时选择CONTINUE]"
+                f"\n...[中间{omitted}条记录已省略；"
+                "现有信息不足时选择CONTINUE]"
             )
         prefixes: list[str] = []
         for entry in selected:
@@ -545,44 +618,72 @@ class ClaimsManager:
         separators = len(selected)
         identity_size = (
             len(header)
+            + len(keyword_preview)
             + separators
             + sum(len(prefix) for prefix in prefixes)
         )
-        if identity_size > limit:
-            marker = (
-                "\n...[反驳身份截断：反驳身份超出上下文安全上限；内容已截断；"
+        if identity_size + len(omission_marker) > limit:
+            marker = "[MUST_CONTINUE:TRUNCATED]\n"
+            detail = (
+                "...[反驳身份截断：超出上下文安全上限；"
                 "部分身份未展开，必须CONTINUE，不得据此收敛]...\n"
             )
-            available = max(0, limit - len(header) - len(marker) - 1)
-            identities = "\n".join(prefixes)
-            head_size = available // 2
-            tail_size = available - head_size
-            tail = identities[-tail_size:] if tail_size else ""
-            return (
-                header
-                + "\n"
-                + identities[:head_size].rstrip()
-                + marker
-                + tail.lstrip()
-            )[:limit]
+            if len(marker) + len(detail) <= limit:
+                marker += detail
+            prefix = header + keyword_preview + "\n" + marker
+            if limit <= len(prefix):
+                return prefix[:max(0, limit)]
+            identities = "\n".join(prefixes) + omission_marker
+            return prefix + cls._truncate_ends(identities, limit - len(prefix))
+        fixed_size = (
+            len(header)
+            + len(keyword_preview)
+            + len(omission_marker)
+            + separators
+            + sum(len(prefix) for prefix in prefixes)
+            + len(selected)
+        )
         content_budget = max(
             0,
-            limit
-            - len(header)
-            - len(omission_marker)
-            - separators
-            - sum(len(prefix) for prefix in prefixes)
-            - len(selected),
+            limit - fixed_size,
         )
         body_limit, body_extra = divmod(
             content_budget, max(1, len(selected)),
         )
+        entry_limits = [
+            body_limit + (1 if index < body_extra else 0)
+            for index in range(len(selected))
+        ]
+        context_marker = ""
+        if any(
+            len(entry.content) > entry_limit
+            for entry, entry_limit in zip(selected, entry_limits)
+        ):
+            context_marker = "\n[MUST_CONTINUE:TRUNCATED]"
+            content_budget = max(
+                0,
+                limit - fixed_size - len(context_marker),
+            )
+            body_limit, body_extra = divmod(
+                content_budget, max(1, len(selected)),
+            )
+            entry_limits = [
+                body_limit + (1 if index < body_extra else 0)
+                for index in range(len(selected))
+            ]
         blocks: list[str] = []
-        for index, (entry, prefix) in enumerate(zip(selected, prefixes)):
-            entry_limit = body_limit + (1 if index < body_extra else 0)
+        for entry, prefix, entry_limit in zip(
+            selected,
+            prefixes,
+            entry_limits,
+        ):
             body = cls._truncate_ends(entry.content, entry_limit)
             blocks.append(prefix + (f" {body}" if body else ""))
-        rendered = header + "\n" + "\n".join(blocks) + omission_marker
+        rendered = (
+            header + keyword_preview + context_marker + "\n"
+            + "\n".join(blocks)
+            + omission_marker
+        )
         return cls._truncate_ends(rendered, limit)
 
     def format_host_candidate_batches(
@@ -592,8 +693,14 @@ class ClaimsManager:
         batches: list[str] = []
         current: list[str] = []
         current_size = 0
-        for claim in self.get_host_candidates():
-            block = self._compact_claim(claim, min(4_000, max_chars))
+        candidates = self.get_host_candidates()
+        references = self.build_host_references(candidates)
+        for claim in candidates:
+            block = self._compact_claim(
+                claim,
+                min(4_000, max_chars),
+                reference=references[claim.keyword],
+            )
             block_size = len(block) + (2 if current else 0)
             if current and (
                 current_size + block_size > max_chars
@@ -614,7 +721,11 @@ class ClaimsManager:
         claims = self.get_host_candidates()
         if not claims:
             return ""
-        prefixes = [f"- {claim.keyword}: " for claim in claims]
+        references = self.build_host_references(claims)
+        prefixes = [
+            f"- {references[claim.keyword]}: "
+            for claim in claims
+        ]
         fixed_size = sum(len(prefix) for prefix in prefixes) + len(claims) - 1
         available = max(0, max_chars - fixed_size)
         base_content_limit, extra = divmod(available, len(claims))
@@ -696,12 +807,16 @@ class ClaimsManager:
                 preview = ", ".join(omitted_keywords[:10])
                 suffix = "..." if len(omitted_keywords) > 10 else ""
                 marker = marker[:-1] + f"：{preview}{suffix}]"
+            marker = cls._truncate_ends(marker, budget)
             if used + len(marker) + 1 <= budget:
                 selected.append(marker)
             elif selected:
-                selected[-1] = cls._truncate(
-                    selected[-1], max(40, len(selected[-1]) - len(marker) - 1),
+                prefix_budget = max(0, budget - len(marker) - 1)
+                prefix = cls._truncate(
+                    "\n".join(selected),
+                    prefix_budget,
                 )
+                selected = [prefix] if prefix else []
                 selected.append(marker)
             else:
                 selected.append(cls._truncate(marker, budget))
@@ -715,13 +830,29 @@ class ClaimsManager:
         separators = len(blocks) - 1
         if separators > budget:
             return [cls._truncate(
-                f"...[{len(blocks)}个定向请求超出上下文安全上限]",
+                f"[MUST_CONTINUE:TRUNCATED_TARGETED_REQUESTS] "
+                f"{len(blocks)}个定向请求超出上下文安全上限",
                 budget,
             )]
         block_budget, extra = divmod(
             budget - separators,
             len(blocks),
         )
+        if block_budget < 64:
+            return [cls._truncate(
+                f"[MUST_CONTINUE:TRUNCATED_TARGETED_REQUESTS] "
+                f"{len(blocks)}个定向请求无法在预算内保留身份",
+                budget,
+            )]
+        if any(
+            len(block.partition("\n")[0]) + 64 > block_budget
+            for block in blocks
+        ):
+            return [cls._truncate(
+                f"[MUST_CONTINUE:TRUNCATED_TARGETED_REQUESTS] "
+                f"{len(blocks)}个定向请求的claim身份超出预算",
+                budget,
+            )]
         return [
             cls._truncate_ends(block, block_budget + (index < extra))
             for index, block in enumerate(blocks)

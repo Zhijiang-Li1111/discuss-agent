@@ -363,8 +363,17 @@ class DiscussionEngine:
         claim_batches = claims_mgr.format_host_candidate_batches(
             max_claims=max(1, host_max_tokens // 100),
         )
+        keyword_to_reference = ClaimsManager.build_host_references(candidates)
+        reference_to_keyword = {
+            reference: keyword
+            for keyword, reference in keyword_to_reference.items()
+        }
         global_context = claims_mgr.format_host_global_context()
         agent_names = [ac.name for ac in self._config.agents]
+        bounded_agent_names = ClaimsManager._truncate(
+            json.dumps(agent_names, ensure_ascii=False),
+            8_000,
+        )
         final_round = round_num == self._config.max_rounds
         final_instruction = ""
         if final_round:
@@ -378,6 +387,11 @@ class DiscussionEngine:
         for batch_index, claims_text in enumerate(claim_batches, start=1):
             expected_keywords = ClaimsManager.claim_keywords_from_formatted(
                 claims_text,
+            )
+            truncated_references = (
+                ClaimsManager.truncated_claim_references_from_formatted(
+                    claims_text,
+                )
             )
             prompt = (
                 "讨论目标/议题："
@@ -404,7 +418,7 @@ class DiscussionEngine:
                 "失败条件：证据无法追溯、关键反驳被忽略、UNKNOWN 被伪装成事实、"
                 "或上下文截断导致无法判断时，必须 CONTINUE，不得假收敛。\n"
                 f"{final_instruction}"
-                f"可定向的 Agent：{json.dumps(agent_names, ensure_ascii=False)}\n"
+                f"可定向的 Agent：{bounded_agent_names}\n"
                 "本批每个 claim 必须且只能输出一次。输出 JSON 数组，不要输出其他文字：\n"
                 '[{"claim":"关键词","verdict":"CLOSED:共识|CLOSED:分歧|CONTINUE",'
                 '"reason":"基于证据的理由","missing":"CONTINUE时缺什么，否则空字符串",'
@@ -433,6 +447,24 @@ class DiscussionEngine:
                                 and len(returned_claims) == len(expected_keywords)
                                 and set(returned_claims) == expected_keywords
                             ):
+                                for item in parsed:
+                                    reference = item["claim"]
+                                    if reference in truncated_references:
+                                        item.update({
+                                            "verdict": "CONTINUE",
+                                            "reason": (
+                                                "上下文截断，无法安全关闭 claim"
+                                            ),
+                                            "missing": (
+                                                "完整的 claim 证据、反驳和身份上下文"
+                                            ),
+                                            "needs_agents": agent_names,
+                                            "allow_unknown_progress": False,
+                                        })
+                                    item["claim"] = reference_to_keyword.get(
+                                        reference,
+                                        reference,
+                                    )
                                 verdicts.extend(parsed)
                                 break
                             self._record_host_protocol_rejections(
@@ -511,6 +543,13 @@ class DiscussionEngine:
                 rejection_reason = "invalid verdict"
             elif not isinstance(reason, str) or not reason.strip():
                 rejection_reason = "reason must be a non-empty string"
+            elif decision != "CONTINUE" and (
+                not isinstance(verdict.get("missing", ""), str)
+                or not isinstance(verdict.get("needs_agents", []), list)
+                or bool(verdict.get("missing"))
+                or bool(verdict.get("needs_agents"))
+            ):
+                rejection_reason = "closed verdict has unresolved evidence"
             elif decision == "CONTINUE":
                 needs_agents = verdict.get("needs_agents", [])
                 missing = verdict.get("missing", "")
