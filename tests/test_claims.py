@@ -252,6 +252,26 @@ class TestClaimsManagerMerge:
         assert len(mgr.claims[colliding_keyword].entries) == 1
         assert mgr.unmatched_responses == []
 
+    def test_same_round_exact_open_keyword_outranks_prior_reference_alias(self):
+        mgr = ClaimsManager()
+        long_keyword = "keyword-" + ("x" * 5_000)
+        alias = ClaimsManager.host_reference(long_keyword)
+        mgr.claims[long_keyword] = Claim(long_keyword, "OPEN", [
+            ClaimEntry("FROM", "A", 1, "long claim"),
+        ])
+
+        mgr.merge_round([
+            AgentOutput("B", 2, f"[NEW_CLAIM:{alias}] exact new claim"),
+            AgentOutput("C", 2, f"[REVISE TO:{alias}] revise exact claim"),
+        ])
+
+        assert len(mgr.claims[long_keyword].entries) == 1
+        assert mgr.claims[alias].entries == [
+            ClaimEntry("FROM", "B", 2, "exact new claim"),
+            ClaimEntry("REVISE", "C", 2, "revise exact claim"),
+        ]
+        assert mgr.unmatched_responses == []
+
     def test_merge_ignores_rebuttal_to_nonexistent_claim(self):
         mgr = ClaimsManager()
         mgr.merge_round([
@@ -265,6 +285,27 @@ class TestClaimsManagerMerge:
             "target": "不存在",
             "content": "反驳",
         }]
+
+    def test_merge_does_not_append_late_response_to_closed_claim(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "CLOSED:共识", [
+            ClaimEntry("FROM", "A", 1, "original"),
+            ClaimEntry("HOST", "HOST", 2, "裁决：stable"),
+        ])
+        original_entries = list(mgr.claims["X"].entries)
+
+        mgr.merge_round([
+            AgentOutput("B", 3, "[REVISE TO:X] stale revision"),
+        ])
+
+        assert mgr.claims["X"].entries == original_entries
+        assert mgr.unmatched_responses[-1] == {
+            "agent_name": "B",
+            "round_num": 3,
+            "response_type": "REVISE",
+            "target": "X",
+            "content": "stale revision",
+        }
 
     @pytest.mark.parametrize(
         "marker",
@@ -984,6 +1025,26 @@ class TestGenerateUpdatePrompt:
         assert "closed full discussion" not in later_round
         assert "CLAIM:open" in later_round
         assert "open discussion remains" in later_round
+
+    def test_oversized_closed_claim_gets_one_bounded_status_notice(self):
+        mgr = ClaimsManager()
+        mgr.current_round = 3
+        keyword = "keyword-" + ("x" * 10_000)
+        reference = ClaimsManager.host_reference(keyword)
+        mgr.claims[keyword] = Claim(keyword, "CLOSED:共识", [
+            ClaimEntry("FROM", "A", 1, "closed full discussion"),
+            ClaimEntry("HOST", "HOST", 2, "裁决：stable"),
+        ])
+
+        next_round = mgr.generate_update_prompt(2, agent_name="B")
+        later_round = mgr.generate_update_prompt(3, agent_name="B")
+
+        assert next_round.count(
+            f"- [已关闭] CLAIM:{reference} — CLOSED:共识"
+        ) == 1
+        assert len(next_round) < 100_000
+        assert "closed full discussion" not in next_round
+        assert f"[已关闭] CLAIM:{reference}" not in later_round
 
     def test_generic_update_prompt_uses_bounded_reference_for_long_keyword(self):
         mgr = ClaimsManager()

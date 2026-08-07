@@ -365,14 +365,6 @@ class ClaimsManager:
 
         The program automatically adds FROM tags — agents don't need to include them.
         """
-        keyword_to_reference = self.build_host_references(
-            list(self.claims.values()),
-        )
-        reference_to_keyword = {
-            reference: keyword
-            for keyword, reference in keyword_to_reference.items()
-            if self.claims[keyword].status == "OPEN"
-        }
         for output in agent_outputs:
             for line in output.raw_text.splitlines():
                 if _INDENTED_MARKER_RE.match(line):
@@ -424,12 +416,28 @@ class ClaimsManager:
                     "PARTIAL_ACCEPT",
                     "REVISE",
                 }:
-                    response_target = reference_to_keyword.get(
-                        response.target,
-                        response.target,
-                    )
+                    open_targets = {
+                        keyword
+                        for keyword, claim in self.claims.items()
+                        if claim.status == "OPEN"
+                    }
+                    if response.target in open_targets:
+                        response_target = response.target
+                    else:
+                        keyword_to_reference = self.build_host_references(
+                            list(self.claims.values()),
+                        )
+                        reference_to_keyword = {
+                            reference: keyword
+                            for keyword, reference in keyword_to_reference.items()
+                            if keyword in open_targets
+                        }
+                        response_target = reference_to_keyword.get(
+                            response.target,
+                            response.target,
+                        )
                     targets, unmatched = self._resolve_response_targets(
-                        response_target, set(self.claims),
+                        response_target, open_targets,
                     )
                     for target in targets:
                         self.claims[target].add_entry(ClaimEntry(
@@ -1138,7 +1146,7 @@ class ClaimsManager:
         status_changes: list[str] = []
         directed_requests: list[str] = []
         open_claims: list[str] = []
-        open_references = self.build_host_references(
+        claim_references = self.build_host_references(
             list(self.claims.values()),
         )
 
@@ -1158,7 +1166,7 @@ class ClaimsManager:
                     open_claims.append(self._compact_claim(
                         claim,
                         8_000,
-                        reference=open_references[claim.keyword],
+                        reference=claim_references[claim.keyword],
                     ))
                 else:
                     routing = self._host_routing(claim)
@@ -1184,7 +1192,7 @@ class ClaimsManager:
                         request = self._format_response_context(
                             claim,
                             context_budget,
-                            reference=open_references[claim.keyword],
+                            reference=claim_references[claim.keyword],
                         )
                         if suffix:
                             request += "\n" + suffix
@@ -1193,7 +1201,7 @@ class ClaimsManager:
                         open_claims.append(self._compact_claim(
                             claim,
                             8_000,
-                            reference=open_references[claim.keyword],
+                            reference=claim_references[claim.keyword],
                         ))
                 if has_recent_new and len(claim.entries) == 1:
                     status_changes.append(f"- [新增] CLAIM:{claim.keyword}")
@@ -1201,7 +1209,8 @@ class ClaimsManager:
                     status_changes.append(f"- [继续讨论] CLAIM:{claim.keyword}")
             elif has_recent_host:
                 status_changes.append(
-                    f"- [已关闭] CLAIM:{claim.keyword} — {claim.status}"
+                    f"- [已关闭] CLAIM:{claim_references[claim.keyword]} "
+                    f"— {claim.status}"
                 )
 
         parts = [f"## 第{self.current_round}轮更新"]
