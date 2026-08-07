@@ -55,6 +55,7 @@ def _continue_judgment(
     reason: str = "gap",
     missing: str = "source",
     needs_agents: list[str] | None = None,
+    allow_unknown_progress: bool = False,
 ) -> dict:
     return {
         "claim": claim,
@@ -62,7 +63,7 @@ def _continue_judgment(
         "reason": reason,
         "missing": missing,
         "needs_agents": ["Agent-B"] if needs_agents is None else needs_agents,
-        "allow_unknown_progress": False,
+        "allow_unknown_progress": allow_unknown_progress,
     }
 
 
@@ -80,6 +81,11 @@ def _conditional_seal_cases() -> list[dict]:
 
 def _round_topology_cases() -> list[dict]:
     path = Path(__file__).parent / "fixtures" / "host_round_topology_cases.json"
+    return json.loads(path.read_text())
+
+
+def _room_coherence_cases() -> list[dict]:
+    path = Path(__file__).parent / "fixtures" / "host_room_coherence_cases.json"
     return json.loads(path.read_text())
 
 
@@ -1048,7 +1054,11 @@ class TestOpenAIHostRouting:
         claims_mgr.format_host_global_context.return_value = "bounded context"
         engine._call_host = AsyncMock(return_value=json.dumps({
             "room_adjudication": _room_judgment(case["expected_room_status"]),
-            "verdicts": [_continue_judgment("claim", needs_agents=[])],
+            "verdicts": [_continue_judgment(
+                "claim",
+                needs_agents=[],
+                allow_unknown_progress=case["allow_unknown_progress"],
+            )],
         }))
 
         await engine._host_judge(claims_mgr, round_num=1)
@@ -1113,6 +1123,69 @@ class TestOpenAIHostRouting:
         for evidence in case["required_evidence"]:
             assert evidence in prompt
         assert case["required_guidance"] in prompt
+
+    @pytest.mark.parametrize(
+        "case",
+        _room_coherence_cases(),
+        ids=lambda case: case["id"],
+    )
+    async def test_host_prompt_requires_room_claim_coherence(
+        self,
+        case,
+    ):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=3))
+        claims_mgr = ClaimsManager()
+        claims_mgr.topic = case["topic"]
+        for keyword, entry_type, agent_name, round_num, content in case["entries"]:
+            claim = claims_mgr.claims.setdefault(
+                keyword,
+                Claim(keyword, "OPEN"),
+            )
+            claim.add_entry(ClaimEntry(
+                entry_type,
+                agent_name,
+                round_num,
+                content,
+            ))
+
+        verdicts = [
+            _continue_judgment(
+                keyword,
+                reason=(
+                    "Conditionally sealed future unknown"
+                    if case["allow_unknown_progress"]
+                    else "Material blocker remains currently resolvable"
+                ),
+                missing=case["missing"],
+                needs_agents=[] if case["allow_unknown_progress"] else [
+                    "Agent-B",
+                ],
+                allow_unknown_progress=case["allow_unknown_progress"],
+            )
+            for keyword in claims_mgr.claims
+        ]
+        engine._call_host = AsyncMock(return_value=json.dumps({
+            "room_adjudication": _room_judgment(
+                case["expected_room_status"],
+            ),
+            "verdicts": verdicts,
+        }))
+
+        accepted = await engine._host_judge(
+            claims_mgr,
+            round_num=case["round_num"],
+        )
+
+        assert accepted == verdicts
+        assert engine._host_room_adjudication == _room_judgment(
+            case["expected_room_status"],
+        )
+        prompt = engine._call_host.await_args.args[1]
+        for evidence in case["required_evidence"]:
+            assert evidence in prompt
 
     def test_conditional_room_seal_cannot_bypass_rejection_or_safety_blockers(self):
         from discuss_agent.claims import Claim, ClaimsManager

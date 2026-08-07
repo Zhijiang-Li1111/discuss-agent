@@ -1,0 +1,52 @@
+[
+  {
+    "id": "future_unavailable_open_may_conditionally_converge",
+    "topic": "Assess the decision as of today and preserve future filing uncertainty.",
+    "round_num": 2,
+    "entries": [
+      ["future-filing", "FROM", "Accounting", 1, "The future filing is not yet published; use an explicit update trigger and bounded scenarios."]
+    ],
+    "expected_room_status": "CONVERGED",
+    "allow_unknown_progress": true,
+    "missing": "A future filing that is not currently available",
+    "required_evidence": [
+      "allow_unknown_progress=true",
+      "SEALED_CONDITIONAL",
+      "没有当前 Agent 或计算可以继续消解"
+    ]
+  },
+  {
+    "id": "current_computable_model_contradiction_cannot_converge",
+    "topic": "Cross-discuss and unify the currently computable valuation model.",
+    "round_num": 2,
+    "entries": [
+      ["valuation-model", "FROM", "Valuation-A", 1, "The main valuation range is 24-36 and model divergence is 30%+."],
+      ["valuation-model", "REVISE", "Valuation-B", 2, "The main valuation range is 25-37 and model divergence is 16%."]
+    ],
+    "expected_room_status": "NOT_CONVERGED",
+    "allow_unknown_progress": false,
+    "missing": "Unify current parameters and rerun the same-assumption calculation",
+    "required_evidence": [
+      "allow_unknown_progress=false",
+      "统一参数",
+      "模型对照",
+      "计算复核"
+    ]
+  },
+  {
+    "id": "unanswered_challenger_blocker_cannot_converge",
+    "topic": "Cross-discuss the thesis and answer the Challenger's material attack.",
+    "round_num": 2,
+    "entries": [
+      ["cost-extrapolation", "FROM", "Challenger", 1, "The cost decline is extrapolated without the required operating KPI evidence."]
+    ],
+    "expected_room_status": "NOT_CONVERGED",
+    "allow_unknown_progress": false,
+    "missing": "A concrete structured response to the recorded Challenger challenge",
+    "required_evidence": [
+      "allow_unknown_progress=false",
+      "material Challenger challenge",
+      "具体后续结构化回应"
+    ]
+  }
+]
