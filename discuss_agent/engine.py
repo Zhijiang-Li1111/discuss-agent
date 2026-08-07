@@ -43,6 +43,8 @@ class DiscussionEngine:
         self._archiver = Archiver()
         self._audit: AuditLogger | None = None
         self._host_protocol_rejections: list[dict] = []
+        self._host_room_adjudication: dict | None = None
+        self._host_safety_blockers: set[str] = set()
 
         # Load context builder
         context_builder = None
@@ -354,6 +356,8 @@ class DiscussionEngine:
         """Ask the Host to semantically judge every OPEN claim."""
         logger.info("=== HOST JUDGE (Round %d) ===", round_num)
         self._host_protocol_rejections = []
+        self._host_room_adjudication = None
+        self._host_safety_blockers = set()
         candidates = claims_mgr.get_host_candidates()
         if not candidates:
             return []
@@ -384,6 +388,7 @@ class DiscussionEngine:
             )
         verdicts: list[dict] = []
         for batch_index, claims_text in enumerate(claim_batches, start=1):
+            is_final_batch = batch_index == len(claim_batches)
             expected_keywords = ClaimsManager.claim_keywords_from_formatted(
                 claims_text,
             )
@@ -434,11 +439,16 @@ class DiscussionEngine:
                 "room-level gate 只约束 room gate claim 及依赖该 gate 的 claim；"
                 "普通 claim 按自身证据独立裁决，可分批关闭，"
                 "不必等待 room 整体准出。\n"
+                "完成逐项裁决后，还要独立判断 room 是否已达到语义完成："
+                "若剩余 OPEN 已被明确条件、限制、置信边界或更新触发器充分封装，"
+                "且不再阻碍议题目标，可判 CONVERGED；"
+                "若仍有会实质改变结论且未封装的 OPEN，必须判 NOT_CONVERGED。"
+                "不得用 OPEN 数量替代该语义判断。\n"
                 "失败条件：证据无法追溯、关键反驳被忽略、UNKNOWN 被伪装成事实、"
                 "或上下文截断导致无法判断时，必须 CONTINUE，不得假收敛。\n"
                 f"{final_instruction}"
                 f"可定向的 Agent：{bounded_agent_names}\n"
-                "本批每个 claim 必须且只能输出一次。输出 JSON 数组，不要输出其他文字；"
+                "本批每个 claim 必须且只能输出一次。不要输出 JSON 以外的文字；"
                 "对象不得缺字段或增加未知字段。\n"
                 "CLOSED JSON对象严格字段："
                 '{"claim":"关键词","verdict":"CLOSED:共识|CLOSED:分歧",'
@@ -447,7 +457,17 @@ class DiscussionEngine:
                 '{"claim":"关键词","verdict":"CONTINUE","reason":"非空理由",'
                 '"missing":"字符串，可为空或描述外部/无人可补缺口",'
                 '"needs_agents":["零个或多个有效Agent名称"],'
-                '"allow_unknown_progress":false}'
+                '"allow_unknown_progress":false}\n'
+                + (
+                    "这是最后一个候选批次。输出严格 JSON 对象："
+                    '{"room_adjudication":{"status":"CONVERGED|NOT_CONVERGED",'
+                    '"reason":"非空语义理由"},"verdicts":[上述逐项对象]}。'
+                    "room_adjudication 必须恰好一次。"
+                    "为兼容旧协议，运行时仍接受仅含逐项对象的 JSON 数组，"
+                    "但旧协议只有全部 claim 关闭时才收敛。"
+                    if is_final_batch
+                    else "这不是最后一个候选批次。仅输出逐项对象的 JSON 数组。"
+                )
             )
             for attempt in range(2):
                 try:
@@ -464,6 +484,31 @@ class DiscussionEngine:
                             "invalid JSON array",
                         )
                         continue
+                    room_adjudication = None
+                    if (
+                        isinstance(parsed, dict)
+                        and is_final_batch
+                        and (
+                            "room_adjudication" in parsed
+                            or "verdicts" in parsed
+                        )
+                    ):
+                        if set(parsed) != {"room_adjudication", "verdicts"}:
+                            self._record_host_attempt_rejection(
+                                attempt + 1,
+                                "invalid room adjudication wrapper",
+                            )
+                            continue
+                        room_adjudication = parsed["room_adjudication"]
+                        if not self._room_adjudication_schema_is_valid(
+                            room_adjudication,
+                        ):
+                            self._record_host_attempt_rejection(
+                                attempt + 1,
+                                "invalid room adjudication schema",
+                            )
+                            continue
+                        parsed = parsed["verdicts"]
                     if not isinstance(parsed, list):
                         self._record_host_attempt_rejection(
                             attempt + 1,
@@ -529,6 +574,11 @@ class DiscussionEngine:
                         for item in parsed:
                             reference = item["claim"]
                             if reference in truncated_references:
+                                keyword = reference_to_keyword.get(
+                                    reference,
+                                    reference,
+                                )
+                                self._host_safety_blockers.add(keyword)
                                 item.clear()
                                 item.update({
                                     "claim": reference,
@@ -547,6 +597,8 @@ class DiscussionEngine:
                                 reference,
                             )
                         verdicts.extend(parsed)
+                        if is_final_batch:
+                            self._host_room_adjudication = room_adjudication
                         break
                     self._record_host_protocol_rejections(
                         parsed,
@@ -755,6 +807,41 @@ class DiscussionEngine:
             and type(verdict["allow_unknown_progress"]) is bool
         )
 
+    @staticmethod
+    def _room_adjudication_schema_is_valid(adjudication: object) -> bool:
+        return (
+            isinstance(adjudication, dict)
+            and set(adjudication) == {"status", "reason"}
+            and type(adjudication["status"]) is str
+            and adjudication["status"] in {"CONVERGED", "NOT_CONVERGED"}
+            and type(adjudication["reason"]) is str
+            and bool(adjudication["reason"].strip())
+        )
+
+    def _room_converged(
+        self,
+        claims_mgr: ClaimsManager,
+        *,
+        accepted: list[dict],
+        rejected: list[dict],
+        offered_keywords: set[str],
+    ) -> bool:
+        """Honor Host room semantics after deterministic protocol checks."""
+        if self._host_room_adjudication is None:
+            return bool(claims_mgr.claims) and not claims_mgr.get_open_claims()
+        if self._host_room_adjudication["status"] != "CONVERGED":
+            return False
+        accepted_keywords = {
+            verdict["claim"]
+            for verdict in accepted
+            if isinstance(verdict.get("claim"), str)
+        }
+        return (
+            not rejected
+            and accepted_keywords == offered_keywords
+            and not self._host_safety_blockers
+        )
+
     async def _host_summarize(
         self, claims_mgr: ClaimsManager, round_num: int | None = None,
     ) -> str:
@@ -792,6 +879,9 @@ class DiscussionEngine:
             topic = context.strip().split("\n")[0] if context.strip() else "讨论议题"
             claims_mgr.topic = topic
             rounds_completed = 0
+            accepted: list[dict] = []
+            rejected: list[dict] = []
+            offered_keywords: set[str] = set()
 
             for round_num in range(1, max_rounds + 1):
                 if round_num == 1:
@@ -826,6 +916,7 @@ class DiscussionEngine:
                         round_num,
                     )
                     self._archiver.save_round(round_num, "host", {
+                        "room_adjudication": self._host_room_adjudication,
                         "verdicts": verdicts,
                         "accepted_verdicts": accepted,
                         "rejected_verdicts": [
@@ -834,8 +925,13 @@ class DiscussionEngine:
                         ],
                     })
 
-                if claims_mgr.claims and not claims_mgr.get_open_claims():
-                    logger.info("All claims closed. Generating summary.")
+                if self._room_converged(
+                    claims_mgr,
+                    accepted=accepted,
+                    rejected=rejected,
+                    offered_keywords=offered_keywords,
+                ):
+                    logger.info("Host adjudicated room convergence. Generating summary.")
                     if self._config.host.skip_summary:
                         summary = None
                     else:

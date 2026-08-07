@@ -65,6 +65,13 @@ def _continue_judgment(
     }
 
 
+def _room_judgment(status: str, reason: str = "room semantics resolved") -> dict:
+    return {
+        "status": status,
+        "reason": reason,
+    }
+
+
 class TestDiscussionEngineIntegration:
     """Test 2 agents running 2 rounds with CLAIM state transitions."""
 
@@ -260,6 +267,163 @@ class TestDiscussionEngineIntegration:
         assert result.summary is None
         archiver_inst.save_summary.assert_not_called()
 
+    @patch("discuss_agent.engine.generate_usage_summary")
+    @patch("discuss_agent.engine.AuditLogger")
+    @patch("discuss_agent.engine.Archiver")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.AgentConversation")
+    async def test_open_claim_can_remain_when_host_declares_room_complete(
+        self,
+        MockConversation,
+        MockCtxMgr,
+        MockArchiver,
+        MockAuditLogger,
+        mock_usage_summary,
+    ):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = _make_config(num_agents=2, max_rounds=1)
+        archiver = MagicMock()
+        archiver.start_session.return_value = "/tmp/test_semantic_completion"
+        MockArchiver.return_value = archiver
+        MockAuditLogger.return_value = MagicMock()
+        MockCtxMgr.return_value.build_initial_context = AsyncMock(
+            return_value="generic topic",
+        )
+
+        def make_conv(**kwargs):
+            conv = MagicMock(messages=[])
+            if kwargs["agent_name"] == "Agent-A":
+                conv.send = AsyncMock(
+                    return_value="[NEW_CLAIM:future] future value is UNKNOWN",
+                )
+            else:
+                conv.send = AsyncMock(return_value="")
+            return conv
+
+        MockConversation.side_effect = make_conv
+        engine = DiscussionEngine(config)
+
+        async def judge(_claims_mgr, _round_num):
+            engine._host_room_adjudication = _room_judgment("CONVERGED")
+            return [
+                _continue_judgment(
+                    "future",
+                    reason="encapsulated by an update trigger",
+                    missing="future observation",
+                    needs_agents=[],
+                )
+                | {"allow_unknown_progress": True}
+            ]
+
+        engine._host_judge = AsyncMock(side_effect=judge)
+
+        result = await engine.run()
+
+        assert result.converged is True
+        assert result.rounds_completed == 1
+        assert result.remaining_disputes == []
+        host_record = next(
+            call.args[2]
+            for call in archiver.save_round.call_args_list
+            if call.args[1] == "host"
+        )
+        assert host_record["room_adjudication"] == _room_judgment("CONVERGED")
+        assert host_record["accepted_verdicts"][0]["verdict"] == "CONTINUE"
+
+    @patch("discuss_agent.engine.generate_usage_summary")
+    @patch("discuss_agent.engine.AuditLogger")
+    @patch("discuss_agent.engine.Archiver")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.AgentConversation")
+    async def test_material_open_claim_continues_when_host_declares_not_converged(
+        self,
+        MockConversation,
+        MockCtxMgr,
+        MockArchiver,
+        MockAuditLogger,
+        mock_usage_summary,
+    ):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = _make_config(num_agents=2, max_rounds=2)
+        archiver = MagicMock()
+        archiver.start_session.return_value = "/tmp/test_material_open"
+        MockArchiver.return_value = archiver
+        MockAuditLogger.return_value = MagicMock()
+        MockCtxMgr.return_value.build_initial_context = AsyncMock(
+            return_value="generic topic",
+        )
+        calls = {"Agent-A": 0, "Agent-B": 0}
+
+        def make_conv(**kwargs):
+            name = kwargs["agent_name"]
+            conv = MagicMock(messages=[])
+
+            async def send(_prompt):
+                calls[name] += 1
+                if calls[name] == 1 and name == "Agent-A":
+                    return "[NEW_CLAIM:material] unsupported material assertion"
+                if calls[name] > 1:
+                    return "[REBUTTAL TO:material] still lacks a decisive boundary"
+                return "[ACCEPT TO:material] initial review"
+
+            conv.send = AsyncMock(side_effect=send)
+            return conv
+
+        MockConversation.side_effect = make_conv
+        engine = DiscussionEngine(config)
+
+        async def judge(_claims_mgr, _round_num):
+            engine._host_room_adjudication = _room_judgment(
+                "NOT_CONVERGED",
+                "material claim remains unencapsulated",
+            )
+            return [_continue_judgment("material", needs_agents=["Agent-B"])]
+
+        engine._host_judge = AsyncMock(side_effect=judge)
+
+        result = await engine.run()
+
+        assert result.converged is False
+        assert result.rounds_completed == 2
+        assert result.remaining_disputes == ["material"]
+        assert calls == {"Agent-A": 2, "Agent-B": 2}
+
+    @patch("discuss_agent.engine.generate_usage_summary")
+    @patch("discuss_agent.engine.AuditLogger")
+    @patch("discuss_agent.engine.Archiver")
+    @patch("discuss_agent.engine.ContextManager")
+    @patch("discuss_agent.engine.AgentConversation")
+    async def test_legacy_host_output_still_requires_all_claims_closed(
+        self,
+        MockConversation,
+        MockCtxMgr,
+        MockArchiver,
+        MockAuditLogger,
+        mock_usage_summary,
+    ):
+        from discuss_agent.engine import DiscussionEngine
+
+        config = _make_config(num_agents=1, max_rounds=1)
+        archiver = MagicMock()
+        archiver.start_session.return_value = "/tmp/test_legacy_host"
+        MockArchiver.return_value = archiver
+        MockAuditLogger.return_value = MagicMock()
+        MockCtxMgr.return_value.build_initial_context = AsyncMock(return_value="topic")
+        conv = MagicMock(messages=[])
+        conv.send = AsyncMock(return_value="[NEW_CLAIM:legacy] unresolved")
+        MockConversation.return_value = conv
+        engine = DiscussionEngine(config)
+        engine._host_judge = AsyncMock(return_value=[
+            _continue_judgment("legacy", needs_agents=[]),
+        ])
+
+        result = await engine.run()
+
+        assert result.converged is False
+        assert result.remaining_disputes == ["legacy"]
+
 
 class TestOpenAIHostRouting:
     """Host judge and summary use the OpenAI-compatible protocol when configured."""
@@ -342,6 +506,96 @@ class TestOpenAIHostRouting:
         assert "候选批次：1/2" in prompts[0]
         assert "候选批次：2/2" in prompts[1]
         assert all("GLOBAL: first depends on second" in prompt for prompt in prompts)
+
+    async def test_host_judge_accepts_explicit_room_adjudication(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock(keyword="future")]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:future [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = "future is bounded"
+        verdict = _continue_judgment(
+            "future",
+            reason="condition and update trigger are explicit",
+            missing="future observation",
+            needs_agents=[],
+        ) | {"allow_unknown_progress": True}
+        engine._call_host = AsyncMock(return_value=json.dumps({
+            "room_adjudication": _room_judgment("CONVERGED"),
+            "verdicts": [verdict],
+        }))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=2)
+
+        assert verdicts == [verdict]
+        assert engine._host_room_adjudication == _room_judgment("CONVERGED")
+
+    async def test_explicit_completion_cannot_bypass_truncation_gate(self):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = ClaimsManager()
+        claims_mgr.topic = "topic"
+        claims_mgr.claims["large"] = Claim("large", "OPEN", [
+            ClaimEntry("FROM", "Agent-A", 1, "x" * 10_000),
+        ])
+        engine._call_host = AsyncMock(return_value=json.dumps({
+            "room_adjudication": _room_judgment("CONVERGED"),
+            "verdicts": [_closed_judgment("large")],
+        }))
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=2)
+        offered = {"large"}
+        accepted, rejected = engine._apply_host_verdicts(
+            claims_mgr,
+            verdicts,
+            offered,
+            round_num=2,
+        )
+
+        assert verdicts[0]["verdict"] == "CONTINUE"
+        assert engine._room_converged(
+            claims_mgr,
+            accepted=accepted,
+            rejected=rejected,
+            offered_keywords=offered,
+        ) is False
+
+    async def test_invalid_explicit_wrapper_cannot_bypass_schema_and_identity(self):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock(keyword="X")]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:X [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = "global"
+        engine._call_host = AsyncMock(side_effect=[
+            json.dumps({
+                "room_adjudication": _room_judgment("CONVERGED"),
+                "verdicts": [_closed_judgment("wrong")],
+            }),
+            json.dumps({
+                "room_adjudication": {
+                    "status": "CONVERGED",
+                    "reason": "",
+                },
+                "verdicts": [_closed_judgment("X")],
+            }),
+        ])
+
+        verdicts = await engine._host_judge(claims_mgr, round_num=2)
+
+        assert verdicts == []
+        assert engine._host_room_adjudication is None
+        assert engine._call_host.await_count == 2
 
     async def test_host_judge_does_not_force_unrelated_claim_on_global_truncation(self):
         from discuss_agent.engine import DiscussionEngine

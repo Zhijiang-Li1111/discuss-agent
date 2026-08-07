@@ -53,16 +53,16 @@ Generic multi-agent adversarial discussion framework.
 │     └────────────────────────────┬───────────────────────────────┘      │
 │  │                               ▼                                  │  │
 │     ┌────────────────────────────────────────────────────────────┐      │
-│  │  │  3. HOST JUDGE — convergence check                         │  │  │
+│  │  │  3. HOST JUDGE — claim verdicts + room semantic outcome    │  │  │
 │     │                                                            │      │
-│  │  │   ┌────────────┐    [{"claim": "...",                      │  │  │
-│     │   │    Host     │      "verdict": "CLOSED:*|CONTINUE",     │      │
-│  │  │   │   Agent    │      "reason": "...", ...}]               │  │  │
+│  │  │   ┌────────────┐    {"room_adjudication": {...},           │  │  │
+│     │   │    Host     │     "verdicts": [{"claim": "...",        │      │
+│  │  │   │   Agent    │       "verdict": "CLOSED:*|CONTINUE"}]}   │  │  │
 │     │   └────────────┘                                           │      │
 │  │  └──────────┬──────────────────────────┬──────────────────────┘  │  │
 │                │                          │                            │
-│  │     Host closes all           OPEN claims &&                       │  │
-│        OPEN claims               round < max_rounds safety cap         │
+│  │     Host judges room          Host judges room                      │  │
+│        semantically complete     incomplete && round < max_rounds      │
 │  │             │                          │                         │  │
 │                ▼                          └──────── loop back ──┐       │
 │  └ ─ ─ ─ ─ ─ ─│─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ┘  │
@@ -159,6 +159,15 @@ Output is archived to `discussions/{timestamp}/` with config, rounds, and a
 summary when generated. Set `host.skip_summary: true` to disable final summary
 generation even when the discussion converges.
 The CLI does not currently support resuming an archived discussion.
+
+The Host's final candidate batch may return an explicit room-level
+`room_adjudication` (`CONVERGED` or `NOT_CONVERGED`) alongside per-claim
+verdicts. A room may converge with ordinary `OPEN` claims when the Host judges
+them fully bounded by explicit conditions, limitations, confidence labels, or
+update triggers. Material unbounded claims remain `NOT_CONVERGED`. Runtime
+still enforces deterministic protocol, identity, and truncation gates. Legacy
+Host JSON arrays remain supported and retain the historical requirement that
+all claims be closed.
 
 ## Configuration
 
