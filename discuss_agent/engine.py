@@ -20,7 +20,11 @@ from discuss_agent.config import (
     normalize_base_url,
 )
 from discuss_agent.context import ContextManager
-from discuss_agent.conversation import AgentConversation
+from discuss_agent.conversation import (
+    AgentConversation,
+    _ToolResultCache,
+    _is_research_search_callable,
+)
 from discuss_agent.models import DiscussionResult
 from discuss_agent.audit import AuditLogger, generate_usage_summary
 from discuss_agent.persistence import Archiver
@@ -184,6 +188,7 @@ class DiscussionEngine:
     def _create_conversations(self) -> None:
         """Create an AgentConversation for each configured agent."""
         global_defs, global_callables = self._load_tools()
+        tool_result_cache = _ToolResultCache()
         logger.info(
             "Loaded %d global tools: %s",
             len(global_defs), list(global_callables.keys()),
@@ -208,6 +213,12 @@ class DiscussionEngine:
                 tools=agent_defs if agent_defs else None,
                 tool_callables=agent_callables if agent_callables else None,
                 audit_logger=self._audit,
+                tool_result_cache=tool_result_cache,
+                cacheable_tool_callables=tuple(
+                    fn
+                    for fn in agent_callables.values()
+                    if _is_research_search_callable(fn)
+                ),
             )
 
     async def _call_agent(self, agent_name: str, prompt: str) -> str | None:

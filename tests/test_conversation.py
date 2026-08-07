@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from io import BytesIO
@@ -136,6 +137,225 @@ class TestConversationToolLoop:
         # Tool results are sent as a single user message with two entries
         tool_result_msg = conv.messages[2]
         assert len(tool_result_msg["content"]) == 2
+
+    async def test_shared_cache_single_flights_exact_duplicate_text_calls(self):
+        cache = conversation_module._ToolResultCache(
+            max_entries=8, max_bytes=1024
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def search(query: str) -> str:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return f"exact result for {query}"
+
+        conversations = [
+            AgentConversation(
+                agent_name=name,
+                system_prompt="test",
+                api_key="fake",
+                tool_callables={"search": search},
+                tool_result_cache=cache,
+                cacheable_tool_callables=(search,),
+            )
+            for name in ("A", "B")
+        ]
+
+        first = asyncio.create_task(
+            conversations[0]._execute_tool("search", {"query": "same"})
+        )
+        await started.wait()
+        second = asyncio.create_task(
+            conversations[1]._execute_tool("search", {"query": "same"})
+        )
+        await asyncio.sleep(0)
+        release.set()
+        first_result, second_result = await asyncio.gather(first, second)
+
+        assert calls == 1
+        assert first_result == second_result
+        assert first_result.text == "exact result for same"
+
+    async def test_shared_cache_does_not_serialize_distinct_queries(self):
+        cache = conversation_module._ToolResultCache(
+            max_entries=8, max_bytes=1024
+        )
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        started_queries = []
+
+        async def search(query: str) -> str:
+            started_queries.append(query)
+            if len(started_queries) == 2:
+                both_started.set()
+            await release.wait()
+            return query
+
+        conversations = [
+            AgentConversation(
+                agent_name=name,
+                system_prompt="test",
+                api_key="fake",
+                tool_callables={"search": search},
+                tool_result_cache=cache,
+                cacheable_tool_callables=(search,),
+            )
+            for name in ("A", "B")
+        ]
+        tasks = [
+            asyncio.create_task(
+                conversation._execute_tool("search", {"query": query})
+            )
+            for conversation, query in zip(
+                conversations, ("first", "second")
+            )
+        ]
+
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        release.set()
+        results = await asyncio.gather(*tasks)
+
+        assert set(started_queries) == {"first", "second"}
+        assert [result.text for result in results] == ["first", "second"]
+
+    async def test_shared_cache_does_not_cache_failures_or_non_text_values(self):
+        cache = conversation_module._ToolResultCache(
+            max_entries=8, max_bytes=1024
+        )
+        failure_calls = 0
+        mapping_calls = 0
+
+        def flaky() -> str:
+            nonlocal failure_calls
+            failure_calls += 1
+            if failure_calls == 1:
+                raise RuntimeError("temporary")
+            return "recovered"
+
+        def mapping():
+            nonlocal mapping_calls
+            mapping_calls += 1
+            return {"call": mapping_calls}
+
+        conv = AgentConversation(
+            agent_name="A",
+            system_prompt="test",
+            api_key="fake",
+            tool_callables={"flaky": flaky, "mapping": mapping},
+            tool_result_cache=cache,
+            cacheable_tool_callables=(flaky, mapping),
+        )
+
+        assert "temporary" in (
+            await conv._execute_tool("flaky", {})
+        ).text
+        assert (
+            await conv._execute_tool("flaky", {})
+        ).text == "recovered"
+        assert failure_calls == 2
+        assert (
+            await conv._execute_tool("mapping", {})
+        ).text == '{"call": 1}'
+        assert (
+            await conv._execute_tool("mapping", {})
+        ).text == '{"call": 2}'
+        assert mapping_calls == 2
+
+    async def test_shared_cache_evicts_oldest_result_at_capacity(self):
+        cache = conversation_module._ToolResultCache(
+            max_entries=1, max_bytes=1024
+        )
+        calls = []
+
+        def search(query: str) -> str:
+            calls.append(query)
+            return query
+
+        conv = AgentConversation(
+            agent_name="A",
+            system_prompt="test",
+            api_key="fake",
+            tool_callables={"search": search},
+            tool_result_cache=cache,
+            cacheable_tool_callables=(search,),
+        )
+
+        await conv._execute_tool("search", {"query": "first"})
+        await conv._execute_tool("search", {"query": "second"})
+        await conv._execute_tool("search", {"query": "first"})
+
+        assert calls == ["first", "second", "first"]
+
+    async def test_shared_cache_ignores_unapproved_text_tools(self):
+        cache = conversation_module._ToolResultCache(
+            max_entries=8, max_bytes=1024
+        )
+        calls = 0
+
+        def dynamic_web_search(query: str) -> str:
+            nonlocal calls
+            calls += 1
+            return f"version {calls}"
+
+        conv = AgentConversation(
+            agent_name="A",
+            system_prompt="test",
+            api_key="fake",
+            tool_callables={"web_search": dynamic_web_search},
+            tool_result_cache=cache,
+        )
+
+        first = await conv._execute_tool("web_search", {"query": "same"})
+        second = await conv._execute_tool("web_search", {"query": "same"})
+
+        assert first.text == "version 1"
+        assert second.text == "version 2"
+        assert calls == 2
+
+    async def test_research_degradation_response_is_not_cached(self):
+        cache = conversation_module._ToolResultCache(
+            max_entries=8, max_bytes=1024
+        )
+        calls = 0
+
+        def search_research(self, query: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "研报搜索服务暂不可用，请基于其他信息进行讨论。"
+            return f"关于「{query}」的研报搜索结果：\n\nresult"
+
+        research_type = type(
+            "ResearchSearchTools",
+            (),
+            {"search_research": search_research},
+        )
+        research_type.__module__ = "discuss_tools.research_search"
+        toolkit = research_type()
+        tool = toolkit.search_research
+        conv = AgentConversation(
+            agent_name="A",
+            system_prompt="test",
+            api_key="fake",
+            tool_callables={"search_research": tool},
+            tool_result_cache=cache,
+            cacheable_tool_callables=(tool,),
+        )
+
+        first = await conv._execute_tool(
+            "search_research", {"query": "same"}
+        )
+        second = await conv._execute_tool(
+            "search_research", {"query": "same"}
+        )
+
+        assert first.text.startswith("研报搜索服务暂不可用")
+        assert second.text.startswith("关于「same」")
+        assert calls == 2
 
     async def test_multi_iteration_tool_loop(self):
         """Claude calls tools across multiple iterations."""

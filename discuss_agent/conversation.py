@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+from collections import OrderedDict
 from dataclasses import dataclass
 import inspect
 from io import BytesIO
@@ -26,6 +28,8 @@ _MAX_TOOL_ITERATIONS = 20
 _MAX_TOOL_IMAGES = 3
 _MAX_TOOL_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_TOOL_IMAGE_PIXELS = 25_000_000
+_RESEARCH_SEARCH_MODULE = "discuss_tools.research_search"
+_RESEARCH_SUCCESS_PREFIXES = ("关于「", "未找到与「")
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,111 @@ class _ToolImage:
 class _ExecutedToolResult:
     text: str
     images: tuple[_ToolImage, ...] = ()
+
+
+def _is_research_search_callable(fn: Callable[..., Any]) -> bool:
+    owner = getattr(fn, "__self__", None)
+    if owner is None:
+        return False
+    owner_type = type(owner)
+    return (
+        owner_type.__module__ == _RESEARCH_SEARCH_MODULE
+        and owner_type.__name__ == "ResearchSearchTools"
+        and getattr(fn, "__name__", None) == "search_research"
+    )
+
+
+class _ToolResultCache:
+    """Bounded run-scoped cache for immutable text-only tool results."""
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = 32,
+        max_bytes: int = 2 * 1024 * 1024,
+    ):
+        if max_entries <= 0 or max_bytes <= 0:
+            raise ValueError("tool result cache limits must be positive")
+        self._max_entries = max_entries
+        self._max_bytes = max_bytes
+        self._size_bytes = 0
+        self._results: OrderedDict[
+            tuple[int, str, str], tuple[_ExecutedToolResult, int]
+        ] = OrderedDict()
+        self._inflight: dict[
+            tuple[int, str, str], asyncio.Future[_ExecutedToolResult | None]
+        ] = {}
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _key(
+        namespace: int, name: str, input_args: dict
+    ) -> tuple[int, str, str] | None:
+        try:
+            encoded = json.dumps(
+                input_args,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return None
+        return namespace, name, encoded
+
+    async def execute(
+        self, namespace: int, name: str, input_args: dict, operation
+    ):
+        key = self._key(namespace, name, input_args)
+        if key is None:
+            result, _ = await operation()
+            return result
+
+        while True:
+            async with self._lock:
+                cached = self._results.get(key)
+                if cached is not None:
+                    self._results.move_to_end(key)
+                    return cached[0]
+
+                future = self._inflight.get(key)
+                leader = future is None
+                if leader:
+                    future = asyncio.get_running_loop().create_future()
+                    self._inflight[key] = future
+
+            if not leader:
+                shared = await asyncio.shield(future)
+                if shared is not None:
+                    return shared
+                continue
+
+            try:
+                result, cacheable = await operation()
+            except BaseException:
+                async with self._lock:
+                    self._inflight.pop(key, None)
+                    if not future.done():
+                        future.set_result(None)
+                raise
+
+            async with self._lock:
+                self._inflight.pop(key, None)
+                shared_result = result if cacheable else None
+                if cacheable:
+                    result_size = len(result.text.encode("utf-8"))
+                    if result_size <= self._max_bytes:
+                        while (
+                            len(self._results) >= self._max_entries
+                            or self._size_bytes + result_size > self._max_bytes
+                        ):
+                            _, (_, removed_size) = self._results.popitem(last=False)
+                            self._size_bytes -= removed_size
+                        self._results[key] = (result, result_size)
+                        self._size_bytes += result_size
+                if not future.done():
+                    future.set_result(shared_result)
+            return result
 
 
 class AgentConversation:
@@ -55,6 +164,8 @@ class AgentConversation:
         tools: list[dict] | None = None,
         tool_callables: dict[str, Callable[..., Any]] | None = None,
         audit_logger: AuditLogger | None = None,
+        tool_result_cache: _ToolResultCache | None = None,
+        cacheable_tool_callables: tuple[Callable[..., Any], ...] | None = None,
     ):
         self.agent_name = agent_name
         self.system_prompt = system_prompt
@@ -67,6 +178,8 @@ class AgentConversation:
         self.messages: list[dict[str, Any]] = []
         self._audit = audit_logger
         self._round_num: int | None = None
+        self._tool_result_cache = tool_result_cache
+        self._cacheable_tool_callables = cacheable_tool_callables or ()
 
         client_kwargs: dict[str, Any] = {"timeout": 600.0}
         if api_key:
@@ -180,18 +293,39 @@ class AgentConversation:
             result = _ExecutedToolResult(json.dumps({"error": error}))
             self._log_tool(name, input_args, result, started, error)
             return result
-        try:
-            value = fn(**input_args)
-            if inspect.isawaitable(value):
-                value = await value
-            result = self._normalize_tool_result(value)
-            self._log_tool(name, input_args, result, started)
-            return result
-        except Exception as exc:
-            logger.warning("Tool '%s' failed for agent '%s': %s", name, self.agent_name, exc)
-            result = _ExecutedToolResult(json.dumps({"error": str(exc)}))
-            self._log_tool(name, input_args, result, started, str(exc))
-            return result
+        error: str | None = None
+
+        async def invoke() -> tuple[_ExecutedToolResult, bool]:
+            nonlocal error
+            try:
+                value = fn(**input_args)
+                if inspect.isawaitable(value):
+                    value = await value
+                result = self._normalize_tool_result(value)
+                explicitly_cacheable = any(
+                    fn is candidate
+                    for candidate in self._cacheable_tool_callables
+                )
+                cacheable = explicitly_cacheable and isinstance(value, str)
+                if cacheable and _is_research_search_callable(fn):
+                    cacheable = value.startswith(_RESEARCH_SUCCESS_PREFIXES)
+                return result, cacheable
+            except Exception as exc:
+                error = str(exc)
+                logger.warning(
+                    "Tool '%s' failed for agent '%s': %s",
+                    name, self.agent_name, exc,
+                )
+                return _ExecutedToolResult(json.dumps({"error": error})), False
+
+        if self._tool_result_cache is None:
+            result, _ = await invoke()
+        else:
+            result = await self._tool_result_cache.execute(
+                id(fn), name, input_args, invoke
+            )
+        self._log_tool(name, input_args, result, started, error)
+        return result
 
     def _log_tool(
         self, name: str, args: dict, result: _ExecutedToolResult,

@@ -945,6 +945,23 @@ def test_zero_arg_toolkit_still_instantiates():
     assert instantiated == [True]
 
 
+def test_conversations_share_one_run_scoped_tool_result_cache():
+    from discuss_agent.engine import DiscussionEngine
+
+    engine = DiscussionEngine(_config())
+    with patch(
+        "discuss_agent.engine.AgentConversation"
+    ) as conversation:
+        engine._create_conversations()
+
+    caches = [
+        call.kwargs["tool_result_cache"]
+        for call in conversation.call_args_list
+    ]
+    assert len(caches) == 2
+    assert caches[0] is caches[1]
+
+
 def test_variadic_constructor_is_not_treated_as_context_aware():
     from discuss_agent.engine import DiscussionEngine
 
