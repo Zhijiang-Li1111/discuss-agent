@@ -356,6 +356,34 @@ def test_semantically_bad_but_structurally_valid_closed_is_host_judgment():
     assert mgr.claims["X"].status == "CLOSED:共识"
 
 
+@pytest.mark.parametrize("verdict", ["CLOSED:共识", "CLOSED:分歧"])
+def test_host_applies_semantic_claim_close(verdict):
+    from discuss_agent.claims import ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims["X"] = _reviewed_claim()
+
+    accepted, rejected = DiscussionEngine(_config())._apply_host_verdicts(
+        mgr,
+        [{
+            "claim": "X",
+            "verdict": verdict,
+            "reason": "bounded claim has no expected material increment",
+        }],
+        {"X"},
+        round_num=2,
+    )
+
+    assert rejected == []
+    assert accepted[0]["verdict"] == verdict
+    assert mgr.claims["X"].status == verdict
+    assert mgr.claims["X"].entries[-1].entry_type == "HOST"
+    assert "no expected material increment" in (
+        mgr.claims["X"].entries[-1].content
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

@@ -15,7 +15,7 @@ from pathlib import Path
 class ClaimEntry:
     """A single entry (statement, rebuttal, accept, host verdict) within a claim."""
 
-    entry_type: str  # "FROM", "REBUTTAL", "ACCEPT", "RESPONSE", "HOST"
+    entry_type: str  # FROM, participant response type, or HOST
     agent_name: str  # agent name or "HOST"
     round_num: int
     content: str
@@ -67,6 +67,7 @@ _UNMATCHED_HEADER = "##UNMATCHED_RESPONSES##"
 _NEEDS_AGENTS_PREFIX = "NEEDS_AGENTS："
 _MISSING_PREFIX = "MISSING："
 _ROUTING_PREFIX = "ROUTING_JSON："
+_CRITICAL_HISTORY_TYPES = ("REBUTTAL", "REVISE", "PARTIAL_ACCEPT")
 
 # Regex for parsing agent outputs
 _MARKER_TARGET = r"((?:[^\[\]\n]|\[[^\[\]\n]*\])*)"
@@ -76,11 +77,17 @@ _REBUTTAL_RE = re.compile(
 _ACCEPT_RE = re.compile(
     rf"\[ACCEPT\s+TO:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
 )
+_PARTIAL_ACCEPT_RE = re.compile(
+    rf"\[PARTIAL_ACCEPT\s+TO:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
+)
+_REVISE_RE = re.compile(
+    rf"\[REVISE\s+TO:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
+)
 _NEW_CLAIM_RE = re.compile(
     rf"\[NEW_CLAIM:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
 )
 _INDENTED_MARKER_RE = re.compile(
-    r"^[ \t]+\[(?:REBUTTAL TO|ACCEPT TO|NEW_CLAIM):",
+    r"^[ \t]+\[(?:REBUTTAL TO|ACCEPT TO|PARTIAL_ACCEPT TO|REVISE TO|NEW_CLAIM):",
 )
 
 
@@ -88,8 +95,8 @@ _INDENTED_MARKER_RE = re.compile(
 class ParsedResponse:
     """A single parsed response from an agent's output."""
 
-    response_type: str  # "REBUTTAL", "ACCEPT", "NEW_CLAIM"
-    target: str  # claim keyword (for REBUTTAL/ACCEPT) or new keyword
+    response_type: str
+    target: str  # existing claim keyword, or new keyword for NEW_CLAIM
     content: str
 
 
@@ -102,7 +109,7 @@ def parse_agent_output(text: str) -> list[ParsedResponse]:
         if not _INDENTED_MARKER_RE.match(line)
     )
     parts = re.split(
-        r"(?m)(?=^\[(?:REBUTTAL TO|ACCEPT TO|NEW_CLAIM):)",
+        r"(?m)(?=^\[(?:REBUTTAL TO|ACCEPT TO|PARTIAL_ACCEPT TO|REVISE TO|NEW_CLAIM):)",
         text,
     )
     for part in parts:
@@ -116,6 +123,16 @@ def parse_agent_output(text: str) -> list[ParsedResponse]:
         m = _ACCEPT_RE.match(part)
         if m:
             responses.append(ParsedResponse("ACCEPT", m.group(1).strip(), m.group(2).strip()))
+            continue
+        m = _PARTIAL_ACCEPT_RE.match(part)
+        if m:
+            responses.append(ParsedResponse(
+                "PARTIAL_ACCEPT", m.group(1).strip(), m.group(2).strip(),
+            ))
+            continue
+        m = _REVISE_RE.match(part)
+        if m:
+            responses.append(ParsedResponse("REVISE", m.group(1).strip(), m.group(2).strip()))
             continue
         m = _NEW_CLAIM_RE.match(part)
         if m:
@@ -348,6 +365,14 @@ class ClaimsManager:
 
         The program automatically adds FROM tags — agents don't need to include them.
         """
+        keyword_to_reference = self.build_host_references(
+            list(self.claims.values()),
+        )
+        reference_to_keyword = {
+            reference: keyword
+            for keyword, reference in keyword_to_reference.items()
+            if self.claims[keyword].status == "OPEN"
+        }
         for output in agent_outputs:
             for line in output.raw_text.splitlines():
                 if _INDENTED_MARKER_RE.match(line):
@@ -393,9 +418,18 @@ class ClaimsManager:
                         content=response.content,
                     ))
                     self.claims[response.target] = claim
-                elif response.response_type in {"REBUTTAL", "ACCEPT"}:
+                elif response.response_type in {
+                    "REBUTTAL",
+                    "ACCEPT",
+                    "PARTIAL_ACCEPT",
+                    "REVISE",
+                }:
+                    response_target = reference_to_keyword.get(
+                        response.target,
+                        response.target,
+                    )
                     targets, unmatched = self._resolve_response_targets(
-                        response.target, set(self.claims),
+                        response_target, set(self.claims),
                     )
                     for target in targets:
                         self.claims[target].add_entry(ClaimEntry(
@@ -610,19 +644,20 @@ class ClaimsManager:
                 for entry in claim.entries[-2:]
             ),
         }
-        rebuttal_rounds = [
-            entry.round_num
-            for entry in claim.entries
-            if entry.entry_type == "REBUTTAL"
-        ]
-        if rebuttal_rounds:
-            latest_rebuttal_round = max(rebuttal_rounds)
-            selected_ids.update(
-                id(entry)
+        for entry_type in _CRITICAL_HISTORY_TYPES:
+            response_rounds = [
+                entry.round_num
                 for entry in claim.entries
-                if entry.entry_type == "REBUTTAL"
-                and entry.round_num == latest_rebuttal_round
-            )
+                if entry.entry_type == entry_type
+            ]
+            if response_rounds:
+                latest_response_round = max(response_rounds)
+                selected_ids.update(
+                    id(entry)
+                    for entry in claim.entries
+                    if entry.entry_type == entry_type
+                    and entry.round_num == latest_response_round
+                )
         latest_host = next(
             (
                 entry for entry in reversed(claim.entries)
@@ -678,7 +713,7 @@ class ClaimsManager:
             if len(required_prefix) > limit:
                 return ""
             detail = (
-                "...[反驳身份截断：超出上下文安全上限；"
+                "...[关键回应身份截断：超出上下文安全上限；"
                 "部分身份未展开，必须CONTINUE，不得据此收敛]..."
             )
             details = "\n".join(
@@ -816,7 +851,22 @@ class ClaimsManager:
         for index, (claim, prefix) in enumerate(zip(claims, prefixes)):
             content_limit = base_content_limit + (1 if index < extra else 0)
             critical_ids: set[int] = set()
-            for entry_type in ("REBUTTAL", "HOST"):
+            for entry_type in _CRITICAL_HISTORY_TYPES:
+                response_rounds = [
+                    entry.round_num
+                    for entry in claim.entries
+                    if entry.entry_type == entry_type
+                ]
+                if not response_rounds:
+                    continue
+                latest_response_round = max(response_rounds)
+                critical_ids.update(
+                    id(entry)
+                    for entry in claim.entries
+                    if entry.entry_type == entry_type
+                    and entry.round_num == latest_response_round
+                )
+            for entry_type in ("HOST",):
                 latest = next(
                     (
                         entry for entry in reversed(claim.entries)
@@ -832,7 +882,15 @@ class ClaimsManager:
                 entry for entry in claim.entries
                 if id(entry) in critical_ids
             ]
-            labels = [f"{entry.entry_type}: " for entry in critical]
+            labels = [
+                (
+                    f"{entry.entry_type} FROM:{entry.agent_name} "
+                    f"@R{entry.round_num}: "
+                    if entry.entry_type in _CRITICAL_HISTORY_TYPES
+                    else f"{entry.entry_type}: "
+                )
+                for entry in critical
+            ]
             summary_overhead = (
                 sum(len(label) for label in labels)
                 + max(0, len(labels) - 1) * 3
@@ -901,30 +959,62 @@ class ClaimsManager:
             used += separator_size + len(block)
         omitted = len(blocks) - len(selected)
         if omitted:
-            marker = f"...[{omitted} {omitted_label}因上下文安全上限未展开]"
+            marker_prefix = "[MUST_CONTINUE:TRUNCATED_CONTEXT_BLOCKS]\n"
+            while selected:
+                omitted = len(blocks) - len(selected)
+                minimum_marker = (
+                    marker_prefix
+                    + f"...[{omitted} {omitted_label}因上下文安全上限未展开]"
+                )
+                if used + 1 + len(minimum_marker) <= budget:
+                    break
+                removed = selected.pop()
+                used -= len(removed) + (1 if selected else 0)
+
+            omitted = len(blocks) - len(selected)
+            base_marker = (
+                marker_prefix
+                + f"...[{omitted} {omitted_label}因上下文安全上限未展开]"
+            )
             omitted_keywords = [
                 match.group(1)
                 for block in blocks[len(selected):]
                 if (match := re.search(r"##CLAIM:(.+?)\s+\[", block))
             ]
-            if omitted_keywords:
+            separator_size = 1 if selected else 0
+            marker_budget = max(0, budget - used - separator_size)
+            marker = cls._truncate(base_marker, marker_budget)
+            if omitted_keywords and len(base_marker) <= marker_budget:
                 preview = ", ".join(omitted_keywords[:10])
                 suffix = "..." if len(omitted_keywords) > 10 else ""
-                marker = marker[:-1] + f"：{preview}{suffix}]"
-            marker = cls._truncate_ends(marker, budget)
-            if used + len(marker) + 1 <= budget:
-                selected.append(marker)
-            elif selected:
-                prefix_budget = max(0, budget - len(marker) - 1)
-                prefix = cls._truncate(
-                    "\n".join(selected),
-                    prefix_budget,
+                preview_budget = marker_budget - len(base_marker)
+                preview = cls._truncate_ends(
+                    f"：{preview}{suffix}",
+                    preview_budget,
                 )
-                selected = [prefix] if prefix else []
+                marker = base_marker[:-1] + preview + "]"
+            if marker:
                 selected.append(marker)
-            else:
-                selected.append(cls._truncate(marker, budget))
         return selected
+
+    @classmethod
+    def _truncate_response_context(cls, block: str, budget: int) -> str:
+        """Bound one routed claim block and disclose secondary truncation."""
+        if len(block) <= budget:
+            return block
+        header, separator, body = block.partition("\n")
+        marker = "[MUST_CONTINUE:TRUNCATED_RESPONSE_CONTEXT]"
+        prefix = header + "\n" + marker
+        if not separator or len(prefix) >= budget:
+            return cls._truncate(prefix, budget)
+        return (
+            prefix
+            + "\n"
+            + cls._truncate_ends(
+                body,
+                budget - len(prefix) - 1,
+            )
+        )
 
     @classmethod
     def _bounded_all_blocks(cls, blocks: list[str], budget: int) -> list[str]:
@@ -958,16 +1048,23 @@ class ClaimsManager:
                 budget,
             )]
         return [
-            cls._truncate_ends(block, block_budget + (index < extra))
+            cls._truncate_response_context(
+                block,
+                block_budget + (index < extra),
+            )
             for index, block in enumerate(blocks)
         ]
 
     @classmethod
     def _format_response_context(
-        cls, claim: Claim, limit: int = 7_000,
+        cls,
+        claim: Claim,
+        limit: int = 7_000,
+        *,
+        reference: str | None = None,
     ) -> str:
         """Render the original claim plus the latest substantive context."""
-        return cls._compact_claim(claim, limit)
+        return cls._compact_claim(claim, limit, reference=reference)
 
     def close_claim(
         self,
@@ -1041,6 +1138,9 @@ class ClaimsManager:
         status_changes: list[str] = []
         directed_requests: list[str] = []
         open_claims: list[str] = []
+        open_references = self.build_host_references(
+            list(self.claims.values()),
+        )
 
         for claim in self.claims.values():
             # Check if status changed since prev_round
@@ -1055,7 +1155,11 @@ class ClaimsManager:
 
             if claim.status == "OPEN":
                 if agent_name is None:
-                    open_claims.append(claim.format())
+                    open_claims.append(self._compact_claim(
+                        claim,
+                        8_000,
+                        reference=open_references[claim.keyword],
+                    ))
                 else:
                     routing = self._host_routing(claim)
                     requested_agents = set(routing["needs_agents"])
@@ -1078,13 +1182,19 @@ class ClaimsManager:
                             1 if suffix else 0
                         )
                         request = self._format_response_context(
-                            claim, context_budget,
+                            claim,
+                            context_budget,
+                            reference=open_references[claim.keyword],
                         )
                         if suffix:
                             request += "\n" + suffix
                         directed_requests.append(request)
                     else:
-                        open_claims.append(self._compact_claim(claim, 8_000))
+                        open_claims.append(self._compact_claim(
+                            claim,
+                            8_000,
+                            reference=open_references[claim.keyword],
+                        ))
                 if has_recent_new and len(claim.entries) == 1:
                     status_changes.append(f"- [新增] CLAIM:{claim.keyword}")
                 if has_recent_host:
@@ -1157,10 +1267,15 @@ class ClaimsManager:
             "\n## 你的任务\n"
             "根据你的职责和专业判断审阅 OPEN CLAIMS；不要用固定数量、固定轮次或全员回应代替实质判断。\n"
             "优先处理 HOST定向请求。其他 claim 仅在与你的职责或证据相关时回应；没有实质增量时不要机械重复。\n"
+            "每位 Agent 都会看到其他人的 OPEN claims，并可主动接受、部分接受、反驳或提出修订；"
+            "这些能力不受角色限制。Challenger 是独立、高强度红队，但无否决权，"
+            "也不是唯一可反驳的角色。\n"
             "- 所有协议 marker 必须从 column 0 开始；缩进 marker 仅记录为协议 warning，不会执行。\n"
             "- [REBUTTAL TO:关键词] 反驳 + 证据\n"
             "- [ACCEPT TO:关键词] 接受 + 理由\n"
-            "- 每个 ACCEPT/REBUTTAL marker 只能写一个精确关键词，不得批量列出。\n"
+            "- [PARTIAL_ACCEPT TO:关键词] 部分接受 + 接受边界/保留条件\n"
+            "- [REVISE TO:关键词] 对现有 claim 提出修订文本 + 理由/证据\n"
+            "- 每个响应 marker 只能写一个精确关键词，不得批量列出。\n"
             "- [NEW_CLAIM:关键词] 仅限新的实质主张、证据、反证或 UNKNOWN；不要为状态改名另开claim。\n"
             "- 证据不足时明确 UNKNOWN、缺什么、应由谁补证；不要把沉默当作同意。\n"
             "可以随时用 research_search 或 web_search 搜索证据。"

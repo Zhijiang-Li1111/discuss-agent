@@ -1009,6 +1009,21 @@ class TestOpenAIHostRouting:
         assert "外部不可得" in prompt
         assert "无人可补" in prompt
         assert "needs_agents 可为空" in prompt
+        assert "同义、近义或重复 claims" in prompt
+        assert "表面回应" in prompt
+        assert "再增加一轮的边际信息价值" in prompt
+        assert "只基于运行时提供的讨论记录" in prompt
+        assert "不得选择或更换模型" in prompt
+        assert "不得修改生成参数" in prompt
+        assert "不得自行重算" in prompt
+        assert "不得发明业务结论" in prompt
+        assert "没有否决权" in prompt
+        assert "claim 自然稳定" in prompt
+        assert "继续讨论已无预期实质增量" in prompt
+        assert "不是对业务结论的背书或最终权威裁决" in prompt
+        assert "忠实记录共识或分歧" in prompt
+        assert "claim-level close 与 room-level convergence 相互独立" in prompt
+        assert "room CONVERGED 仍可与 OPEN claims 共存" in prompt
 
     @pytest.mark.parametrize(
         "case",

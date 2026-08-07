@@ -53,6 +53,8 @@ class TestParseAgentOutput:
             ("NEW_CLAIM", "NEW_CLAIM"),
             ("REBUTTAL TO", "REBUTTAL"),
             ("ACCEPT TO", "ACCEPT"),
+            ("PARTIAL_ACCEPT TO", "PARTIAL_ACCEPT"),
+            ("REVISE TO", "REVISE"),
         ],
     )
     def test_parse_bracketed_keyword(self, marker, response_type):
@@ -195,6 +197,60 @@ class TestClaimsManagerMerge:
         assert len(mgr.claims["Y"].entries) == 2  # FROM + ACCEPT
         assert mgr.claims["Y"].entries[1].entry_type == "ACCEPT"
         assert mgr.claims["Y"].entries[1].agent_name == "A"
+
+    @pytest.mark.parametrize("response_type", ["PARTIAL_ACCEPT", "REVISE"])
+    def test_merge_partial_accept_and_revise(self, response_type):
+        mgr = ClaimsManager()
+        mgr.merge_round([AgentOutput("A", 1, "[NEW_CLAIM:X] original")])
+
+        mgr.merge_round([
+            AgentOutput(
+                "B",
+                2,
+                f"[{response_type} TO:X] bounded update",
+            ),
+        ])
+
+        assert mgr.claims["X"].entries[-1] == ClaimEntry(
+            response_type,
+            "B",
+            2,
+            "bounded update",
+        )
+
+    def test_merge_resolves_oversized_keyword_reference_from_agent_prompt(self):
+        mgr = ClaimsManager()
+        keyword = "keyword-" + ("x" * 5_000)
+        mgr.claims[keyword] = Claim(keyword, "OPEN", [
+            ClaimEntry("FROM", "A", 1, "original"),
+        ])
+        colliding_keyword = ClaimsManager.host_reference(keyword)
+        mgr.claims[colliding_keyword] = Claim(colliding_keyword, "CLOSED:共识", [
+            ClaimEntry("FROM", "C", 1, "collision"),
+        ])
+        reference = ClaimsManager.build_host_references(
+            list(mgr.claims.values()),
+        )[keyword]
+
+        prompt = mgr.generate_update_prompt(1, agent_name="B")
+        mgr.merge_round([
+            AgentOutput(
+                "B",
+                2,
+                f"[REVISE TO:{reference}] material revision",
+            ),
+        ])
+
+        assert f"CLAIM:{reference}" in prompt
+        assert reference != colliding_keyword
+        assert mgr.claims[keyword].entries[-1] == ClaimEntry(
+            "REVISE",
+            "B",
+            2,
+            "material revision",
+        )
+        assert len(mgr.claims[colliding_keyword].entries) == 1
+        assert mgr.unmatched_responses == []
 
     def test_merge_ignores_rebuttal_to_nonexistent_claim(self):
         mgr = ClaimsManager()
@@ -866,6 +922,27 @@ class TestGenerateUpdatePrompt:
         # Task instructions should be present
         assert "REBUTTAL TO" in prompt
 
+    def test_every_agent_can_use_all_response_actions_on_other_open_claims(self):
+        mgr = ClaimsManager()
+        mgr.claims["peer-view"] = Claim("peer-view", "OPEN", [
+            ClaimEntry("FROM", "B", 1, "peer evidence"),
+        ])
+
+        prompt = mgr.generate_update_prompt(prev_round=1, agent_name="A")
+
+        assert "CLAIM:peer-view" in prompt
+        assert "peer evidence" in prompt
+        for marker in (
+            "ACCEPT TO",
+            "PARTIAL_ACCEPT TO",
+            "REBUTTAL TO",
+            "REVISE TO",
+        ):
+            assert marker in prompt
+        assert "每位 Agent" in prompt
+        assert "Challenger" in prompt
+        assert "无否决权" in prompt
+
     def test_update_includes_host_change_from_previous_round(self):
         mgr = ClaimsManager()
         mgr.current_round = 1
@@ -877,6 +954,49 @@ class TestGenerateUpdatePrompt:
         prompt = mgr.generate_update_prompt(prev_round=1, agent_name="A")
 
         assert "[已关闭] CLAIM:X" in prompt
+
+    def test_closed_claim_is_not_replayed_and_notice_is_sent_once(self):
+        mgr = ClaimsManager()
+        mgr.current_round = 3
+        mgr.claims["closed"] = Claim("closed", "CLOSED:分歧", [
+            ClaimEntry("FROM", "A", 1, "closed full discussion"),
+            ClaimEntry("REBUTTAL", "B", 2, "closed counterevidence"),
+            ClaimEntry("HOST", "HOST", 2, "裁决：bounded disagreement"),
+        ])
+        mgr.claims["open"] = Claim("open", "OPEN", [
+            ClaimEntry("FROM", "C", 1, "open discussion remains"),
+        ])
+
+        next_round = mgr.generate_update_prompt(2, agent_name="A")
+        later_round = mgr.generate_update_prompt(3, agent_name="A")
+
+        assert next_round.count(
+            "- [已关闭] CLAIM:closed — CLOSED:分歧"
+        ) == 1
+        assert "closed full discussion" not in next_round
+        assert "closed counterevidence" not in next_round
+        assert "bounded disagreement" not in next_round
+        assert "CLAIM:open" in next_round
+        assert "open discussion remains" in next_round
+
+        assert "[已关闭] CLAIM:closed" not in later_round
+        assert "CLAIM:closed" not in later_round
+        assert "closed full discussion" not in later_round
+        assert "CLAIM:open" in later_round
+        assert "open discussion remains" in later_round
+
+    def test_generic_update_prompt_uses_bounded_reference_for_long_keyword(self):
+        mgr = ClaimsManager()
+        keyword = "keyword-" + ("x" * 5_000)
+        mgr.claims[keyword] = Claim(keyword, "OPEN", [
+            ClaimEntry("FROM", "A", 1, "evidence"),
+        ])
+        reference = ClaimsManager.host_reference(keyword)
+
+        prompt = mgr.generate_update_prompt(prev_round=1)
+
+        assert f"CLAIM:{reference}" in prompt
+        assert len(prompt) < 100_000
 
     def test_update_with_no_changes(self):
         mgr = ClaimsManager()
@@ -1004,6 +1124,56 @@ class TestGenerateUpdatePrompt:
         assert "decisive latest rebuttal" in global_context
         assert "CONTINUE：investigate" in global_context
         assert "decisive latest rebuttal" in directed
+
+    def test_host_and_agent_context_keep_revision_and_partial_accept_condition(
+        self,
+    ):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "original position"),
+            ClaimEntry("REVISE", "A", 2, "material revised boundary"),
+            ClaimEntry(
+                "PARTIAL_ACCEPT",
+                "B",
+                2,
+                "accepted only if condition C holds",
+            ),
+            ClaimEntry("HOST", "HOST", 2, "CONTINUE：verify condition C"),
+            ClaimEntry("ACCEPT", "C", 3, "later generic agreement"),
+            ClaimEntry("RESPONSE", "D", 3, "later unrelated follow-up"),
+        ])
+
+        batches = "\n".join(mgr.format_host_candidate_batches())
+        global_context = mgr.format_host_global_context()
+        directed = mgr._format_response_context(mgr.claims["X"])
+        later_prompt = mgr.generate_update_prompt(3, agent_name="E")
+
+        for material_history in (
+            "material revised boundary",
+            "accepted only if condition C holds",
+        ):
+            assert material_history in batches
+            assert material_history in global_context
+            assert material_history in directed
+            assert material_history in later_prompt
+
+    @pytest.mark.parametrize("entry_type", ["REVISE", "PARTIAL_ACCEPT"])
+    def test_host_global_context_keeps_same_round_critical_identities(
+        self,
+        entry_type,
+    ):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "original"),
+            ClaimEntry(entry_type, "B", 2, "material B"),
+            ClaimEntry(entry_type, "C", 2, "material C"),
+            ClaimEntry("ACCEPT", "D", 3, "later"),
+        ])
+
+        global_context = mgr.format_host_global_context()
+
+        assert f"{entry_type} FROM:B @R2:" in global_context
+        assert f"{entry_type} FROM:C @R2:" in global_context
 
     def test_same_round_rebutters_all_remain_visible_next_round(self):
         mgr = ClaimsManager()
@@ -1349,6 +1519,34 @@ class TestGenerateUpdatePrompt:
             for index in range(100)
         )
 
+    @pytest.mark.parametrize("entry_type", ["REVISE", "PARTIAL_ACCEPT"])
+    def test_compacted_claim_keeps_every_same_round_critical_identity(
+        self,
+        entry_type,
+    ):
+        entries = [ClaimEntry("FROM", "A", 1, "original")]
+        entries.extend(
+            ClaimEntry(
+                entry_type,
+                f"Agent-{index:03d}",
+                2,
+                f"material-{index:03d}",
+            )
+            for index in range(40)
+        )
+        entries.extend([
+            ClaimEntry("ACCEPT", "Later-A", 3, "later"),
+            ClaimEntry("RESPONSE", "Later-B", 3, "latest"),
+        ])
+
+        compact = ClaimsManager._compact_claim(Claim("X", "OPEN", entries), 4_000)
+
+        assert len(compact) <= 4_000
+        assert all(
+            f"[{entry_type} FROM:Agent-{index:03d} @R2]" in compact
+            for index in range(40)
+        )
+
     @pytest.mark.parametrize("directed", [False, True])
     def test_agent_prompt_keeps_every_same_round_rebuttal_identity(
         self, directed,
@@ -1394,8 +1592,26 @@ class TestGenerateUpdatePrompt:
         compact = ClaimsManager._compact_claim(Claim("X", "OPEN", entries), 4_000)
 
         assert len(compact) <= 4_000
-        assert "反驳身份截断" in compact
+        assert "关键回应身份截断" in compact
         assert "超出上下文安全上限" in compact
+        assert "必须CONTINUE" in compact
+
+    @pytest.mark.parametrize("entry_type", ["REVISE", "PARTIAL_ACCEPT"])
+    def test_unrepresentable_critical_identity_set_fail_closes_explicitly(
+        self,
+        entry_type,
+    ):
+        entries = [ClaimEntry("FROM", "A", 1, "original")]
+        entries.extend(
+            ClaimEntry(entry_type, f"Agent-{index:05d}", 2, "material")
+            for index in range(5_000)
+        )
+
+        compact = ClaimsManager._compact_claim(Claim("X", "OPEN", entries), 4_000)
+
+        assert len(compact) <= 4_000
+        assert "MUST_CONTINUE:TRUNCATED" in compact
+        assert "关键回应身份截断" in compact
         assert "必须CONTINUE" in compact
 
     def test_tiny_rebuttal_block_retains_machine_readable_continue_marker(self):
@@ -1435,6 +1651,30 @@ class TestGenerateUpdatePrompt:
 
         assert len("\n".join(bounded)) <= 100
 
+    def test_bounded_blocks_fail_closes_secondary_block_truncation(self):
+        bounded = ClaimsManager._bounded_blocks(
+            ["A" * 48, "B" * 48, "omitted"],
+            100,
+            "blocks",
+        )
+        rendered = "\n".join(bounded)
+
+        assert len(rendered) <= 100
+        assert "MUST_CONTINUE:TRUNCATED_CONTEXT_BLOCKS" in rendered
+
+    def test_bounded_blocks_fail_closes_whole_block_omissions(self):
+        rendered = "\n".join(
+            ClaimsManager._bounded_blocks(
+                ["A" * 60, "B" * 60],
+                100,
+                "blocks",
+            )
+        )
+
+        assert len(rendered) <= 100
+        assert "MUST_CONTINUE:TRUNCATED_CONTEXT_BLOCKS" in rendered
+        assert "2 blocks因上下文安全上限未展开" in rendered
+
     def test_bounded_all_blocks_never_exceeds_budget(self):
         blocks = [f"CLAIM:{index}" for index in range(40_000)]
 
@@ -1442,6 +1682,27 @@ class TestGenerateUpdatePrompt:
 
         assert len("\n".join(bounded)) <= 32_000
         assert "MUST_CONTINUE" in "\n".join(bounded)
+
+    def test_bounded_all_blocks_fail_closes_per_block_secondary_truncation(self):
+        blocks = [
+            (
+                f"##CLAIM:X-{index} [OPEN]##\n"
+                + "head " * 700
+                + f"[REVISE FROM:R-{index} @R2] material revision\n"
+                + f"[PARTIAL_ACCEPT FROM:P-{index} @R2] condition C\n"
+                + "tail " * 700
+            )
+            for index in range(8)
+        ]
+
+        rendered = "\n".join(
+            ClaimsManager._bounded_all_blocks(blocks, 32_000)
+        )
+
+        assert len(rendered) <= 32_000
+        assert rendered.count(
+            "MUST_CONTINUE:TRUNCATED_RESPONSE_CONTEXT"
+        ) == len(blocks)
 
     def test_tiny_directed_block_shares_fail_close_globally(self):
         blocks = [f"##CLAIM:X-{index} [OPEN]##\nMISSING:source" for index in range(1_000)]
