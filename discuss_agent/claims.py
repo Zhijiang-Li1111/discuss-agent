@@ -68,6 +68,7 @@ _NEEDS_AGENTS_PREFIX = "NEEDS_AGENTS："
 _MISSING_PREFIX = "MISSING："
 _ROUTING_PREFIX = "ROUTING_JSON："
 _CRITICAL_HISTORY_TYPES = ("REBUTTAL", "REVISE", "PARTIAL_ACCEPT")
+_STRUCTURED_RESPONSE_TYPES = ("REBUTTAL", "ACCEPT", "PARTIAL_ACCEPT", "REVISE")
 
 # Regex for parsing agent outputs
 _MARKER_TARGET = r"((?:[^\[\]\n]|\[[^\[\]\n]*\])*)"
@@ -834,6 +835,50 @@ class ClaimsManager:
         if current:
             batches.append("\n\n".join(current))
         return batches
+
+    def format_host_round_provenance(
+        self,
+        round_num: int,
+        max_chars: int = 12_000,
+    ) -> str:
+        """Render authoritative topology and structured-response counts."""
+        recorded_rounds = {
+            entry.round_num
+            for claim in self.claims.values()
+            for entry in claim.entries
+            if 1 <= entry.round_num <= round_num
+        }
+        recorded_rounds.update({1, round_num})
+
+        lines = [
+            "ROUND_TOPOLOGY:",
+            "- R1=PARALLEL_INDEPENDENT_INITIAL_OUTPUTS; "
+            "same-round peers were not visible.",
+            "- R2+=PARALLEL_UPDATES_TO_PRIOR_PERSISTED_RECORD; "
+            "same-round peers remain invisible.",
+            "STRUCTURED_RESPONSE_COUNTS:",
+        ]
+        for recorded_round in sorted(recorded_rounds):
+            counts = {
+                response_type: 0
+                for response_type in _STRUCTURED_RESPONSE_TYPES
+            }
+            for claim in self.claims.values():
+                for entry in claim.entries:
+                    if (
+                        entry.round_num == recorded_round
+                        and entry.entry_type in counts
+                    ):
+                        counts[entry.entry_type] += 1
+            lines.append(
+                f"- R{recorded_round} "
+                + " ".join(
+                    f"{response_type}={counts[response_type]}"
+                    for response_type in _STRUCTURED_RESPONSE_TYPES
+                )
+            )
+
+        return self._truncate("\n".join(lines), max_chars)
 
     def format_host_global_context(self, max_chars: int = 40_000) -> str:
         """Summarize every OPEN claim for cross-batch semantic consistency.

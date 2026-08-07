@@ -78,6 +78,11 @@ def _conditional_seal_cases() -> list[dict]:
     return json.loads(path.read_text())
 
 
+def _round_topology_cases() -> list[dict]:
+    path = Path(__file__).parent / "fixtures" / "host_round_topology_cases.json"
+    return json.loads(path.read_text())
+
+
 class TestDiscussionEngineIntegration:
     """Test 2 agents running 2 rounds with CLAIM state transitions."""
 
@@ -1049,6 +1054,64 @@ class TestOpenAIHostRouting:
         await engine._host_judge(claims_mgr, round_num=1)
 
         prompt = engine._call_host.await_args.args[1]
+        assert case["required_guidance"] in prompt
+
+    @pytest.mark.parametrize(
+        "case",
+        _round_topology_cases(),
+        ids=lambda case: case["id"],
+    )
+    async def test_host_prompt_grounds_convergence_in_round_topology(
+        self,
+        case,
+    ):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=3))
+        claims_mgr = ClaimsManager()
+        claims_mgr.topic = case["topic"]
+        for keyword, entry_type, agent_name, round_num, content in case["entries"]:
+            claim = claims_mgr.claims.setdefault(
+                keyword,
+                Claim(keyword, "OPEN"),
+            )
+            claim.add_entry(ClaimEntry(
+                entry_type,
+                agent_name,
+                round_num,
+                content,
+            ))
+
+        converged = case["expected_room_status"] == "CONVERGED"
+        verdicts = [
+            (
+                _closed_judgment(keyword, "record semantically resolved")
+                if converged
+                else _continue_judgment(
+                    keyword,
+                    reason="material response gap",
+                    missing="recorded cross-agent response",
+                    needs_agents=[],
+                )
+            )
+            for keyword in claims_mgr.claims
+        ]
+        engine._call_host = AsyncMock(return_value=json.dumps({
+            "room_adjudication": _room_judgment(
+                case["expected_room_status"],
+            ),
+            "verdicts": verdicts,
+        }))
+
+        await engine._host_judge(
+            claims_mgr,
+            round_num=case["round_num"],
+        )
+
+        prompt = engine._call_host.await_args.args[1]
+        for evidence in case["required_evidence"]:
+            assert evidence in prompt
         assert case["required_guidance"] in prompt
 
     def test_conditional_room_seal_cannot_bypass_rejection_or_safety_blockers(self):

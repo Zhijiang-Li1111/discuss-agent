@@ -1,0 +1,69 @@
+[
+  {
+    "id": "parallel_conflicting_valuations_without_responses",
+    "topic": "Cross-discuss the valuation and include a Challenger attack.",
+    "round_num": 1,
+    "entries": [
+      ["valuation-low", "FROM", "Analyst-A", 1, "Independent valuation range: 14-33."],
+      ["valuation-mid", "FROM", "Analyst-B", 1, "Independent valuation range: 18-36."],
+      ["valuation-high", "FROM", "Challenger", 1, "Independent valuation range: 18.7-47.7."]
+    ],
+    "expected_room_status": "NOT_CONVERGED",
+    "required_evidence": [
+      "R1=PARALLEL_INDEPENDENT_INITIAL_OUTPUTS",
+      "R1 REBUTTAL=0 ACCEPT=0 PARTIAL_ACCEPT=0 REVISE=0",
+      "14-33",
+      "18-36",
+      "18.7-47.7"
+    ],
+    "required_guidance": "必须 CONTINUE 并定向路由"
+  },
+  {
+    "id": "parallel_narrow_same_direction_without_challenge",
+    "topic": "Give a narrow, non-adversarial reading of the supplied definition.",
+    "round_num": 1,
+    "entries": [
+      ["reading-a", "FROM", "Analyst-A", 1, "The supplied definition includes category X."],
+      ["reading-b", "FROM", "Analyst-B", 1, "Category X is included by the supplied definition."]
+    ],
+    "expected_room_status": "CONVERGED",
+    "required_evidence": [
+      "R1=PARALLEL_INDEPENDENT_INITIAL_OUTPUTS",
+      "R1 REBUTTAL=0 ACCEPT=0 PARTIAL_ACCEPT=0 REVISE=0"
+    ],
+    "required_guidance": "仍可在首轮自然收敛"
+  },
+  {
+    "id": "later_recorded_cross_agent_response",
+    "topic": "Review the proposal and resolve the recorded challenge.",
+    "round_num": 3,
+    "entries": [
+      ["proposal", "FROM", "Analyst-A", 1, "Use parameter P."],
+      ["proposal", "REBUTTAL", "Challenger", 2, "P fails under boundary B."],
+      ["proposal", "REVISE", "Analyst-A", 3, "Use P only outside boundary B."]
+    ],
+    "expected_room_status": "CONVERGED",
+    "required_evidence": [
+      "R2 REBUTTAL=1 ACCEPT=0 PARTIAL_ACCEPT=0 REVISE=0",
+      "R3 REBUTTAL=0 ACCEPT=0 PARTIAL_ACCEPT=0 REVISE=1",
+      "[REBUTTAL FROM:Challenger @R2]",
+      "[REVISE FROM:Analyst-A @R3]"
+    ],
+    "required_guidance": "只有针对更早记录"
+  },
+  {
+    "id": "self_claimed_hypothetical_response_without_marker",
+    "topic": "Cross-discuss the thesis and address objections.",
+    "round_num": 1,
+    "entries": [
+      ["thesis", "FROM", "Analyst-A", 1, "I respond to objections and rebuttals: the thesis still holds."],
+      ["risk", "FROM", "Challenger", 1, "A material boundary remains."]
+    ],
+    "expected_room_status": "NOT_CONVERGED",
+    "required_evidence": [
+      "R1 REBUTTAL=0 ACCEPT=0 PARTIAL_ACCEPT=0 REVISE=0",
+      "I respond to objections and rebuttals"
+    ],
+    "required_guidance": "不得仅凭正文自称"
+  }
+]
