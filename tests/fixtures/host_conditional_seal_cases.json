@@ -1,0 +1,27 @@
+[
+  {
+    "id": "unavailable_material_unknown",
+    "expected_room_status": "CONVERGED",
+    "required_guidance": "claim-level truth 与 room-level completion 必须分开判断"
+  },
+  {
+    "id": "future_or_ex_post_fact",
+    "expected_room_status": "CONVERGED",
+    "required_guidance": "不得要求未来材料或事后不可证明事项被补写成事实"
+  },
+  {
+    "id": "process_warning_without_propagation",
+    "expected_room_status": "CONVERGED",
+    "required_guidance": "没有实际传播证据的流程警告或暴露"
+  },
+  {
+    "id": "ordinary_methodology_claim",
+    "expected_room_status": "CONVERGED",
+    "required_guidance": "普通方法论或执行过程 claim"
+  },
+  {
+    "id": "available_untreated_material_gap",
+    "expected_room_status": "NOT_CONVERGED",
+    "required_guidance": "截至当前可获得、对核心结论实质重要且未被处理或条件封装"
+  }
+]

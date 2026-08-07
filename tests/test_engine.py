@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -70,6 +71,11 @@ def _room_judgment(status: str, reason: str = "room semantics resolved") -> dict
         "status": status,
         "reason": reason,
     }
+
+
+def _conditional_seal_cases() -> list[dict]:
+    path = Path(__file__).parent / "fixtures" / "host_conditional_seal_cases.json"
+    return json.loads(path.read_text())
 
 
 class TestDiscussionEngineIntegration:
@@ -1003,6 +1009,57 @@ class TestOpenAIHostRouting:
         assert "外部不可得" in prompt
         assert "无人可补" in prompt
         assert "needs_agents 可为空" in prompt
+
+    @pytest.mark.parametrize(
+        "case",
+        _conditional_seal_cases(),
+        ids=lambda case: case["id"],
+    )
+    async def test_host_prompt_defines_generic_conditional_seal_cases(self, case):
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = MagicMock()
+        claims_mgr.topic = "generic decision topic"
+        claims_mgr.get_host_candidates.return_value = [MagicMock(keyword="claim")]
+        claims_mgr.format_host_candidate_batches.return_value = [
+            "##CLAIM:claim [OPEN]##",
+        ]
+        claims_mgr.format_host_global_context.return_value = "bounded context"
+        engine._call_host = AsyncMock(return_value=json.dumps({
+            "room_adjudication": _room_judgment(case["expected_room_status"]),
+            "verdicts": [_continue_judgment("claim", needs_agents=[])],
+        }))
+
+        await engine._host_judge(claims_mgr, round_num=1)
+
+        prompt = engine._call_host.await_args.args[1]
+        assert case["required_guidance"] in prompt
+
+    def test_conditional_room_seal_cannot_bypass_rejection_or_safety_blockers(self):
+        from discuss_agent.claims import Claim, ClaimsManager
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        claims_mgr = ClaimsManager()
+        claims_mgr.claims["conditional"] = Claim("conditional", "OPEN")
+        engine._host_room_adjudication = _room_judgment("CONVERGED")
+        accepted = [_continue_judgment("conditional", needs_agents=[])]
+
+        assert engine._room_converged(
+            claims_mgr,
+            accepted=accepted,
+            rejected=[{"claim": "conditional", "reason": "invalid schema"}],
+            offered_keywords={"conditional"},
+        ) is False
+
+        engine._host_safety_blockers.add("conditional")
+        assert engine._room_converged(
+            claims_mgr,
+            accepted=accepted,
+            rejected=[],
+            offered_keywords={"conditional"},
+        ) is False
 
     async def test_host_judge_forces_truncated_claim_to_continue(self):
         from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
