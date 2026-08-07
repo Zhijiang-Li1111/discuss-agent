@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -83,13 +84,34 @@ class DiscussionEngine:
 
         return tool_defs, tool_callables
 
-    @staticmethod
     def _load_toolkit(
-        path: str, scope: str, *, strict: bool = False,
+        self, path: str, scope: str, *, strict: bool = False,
     ) -> tuple[list[dict], dict[str, callable]]:
         """Import one configured toolkit and normalize its callable functions."""
         cls = import_from_path(path)
-        toolkit = cls()
+        parameters = inspect.signature(cls).parameters
+        context_parameter = parameters.get("context")
+        if context_parameter is not None and context_parameter.kind in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }:
+            toolkit = cls(context=self._config.context)
+        elif (
+            context_parameter is not None
+            and context_parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+        ):
+            positional_args = []
+            for parameter in parameters.values():
+                if parameter.name == "context":
+                    positional_args.append(self._config.context)
+                    break
+                if parameter.default is inspect.Parameter.empty:
+                    positional_args = []
+                    break
+                positional_args.append(parameter.default)
+            toolkit = cls(*positional_args)
+        else:
+            toolkit = cls()
         functions = getattr(toolkit, "functions", {}) or {}
         async_functions = getattr(toolkit, "async_functions", {}) or {}
         defs: list[dict] = []

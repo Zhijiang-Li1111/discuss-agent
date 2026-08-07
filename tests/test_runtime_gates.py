@@ -898,6 +898,108 @@ def test_strict_toolkit_initialization_and_entrypoint_failures(loaded, message):
             engine._create_conversations()
 
 
+@pytest.mark.parametrize("scope", ["global", "extra"])
+def test_toolkit_context_is_passed_for_global_and_extra_tools(scope):
+    from discuss_agent.engine import DiscussionEngine
+
+    research_dir = (
+        "/home/zhijiang/.openclaw/workspace-research/"
+        "shadow_runs/muyuan_v20_20260807/materials"
+    )
+    context = {"research_dirs": [research_dir], "topic": "readiness"}
+    received = []
+
+    class ContextToolkit:
+        def __init__(self, context):
+            received.append(context)
+            self.functions = {}
+            self.async_functions = {}
+
+    tool = ToolConfig("pkg.ContextToolkit")
+    config = _config(**({"tools": [tool]} if scope == "global" else {"extra_tools": [tool]}))
+    config.context = context
+    engine = DiscussionEngine(config)
+
+    with patch("discuss_agent.engine.import_from_path", return_value=ContextToolkit):
+        engine._create_conversations()
+
+    assert received == [context]
+    assert received[0] is config.context
+
+
+def test_zero_arg_toolkit_still_instantiates():
+    from discuss_agent.engine import DiscussionEngine
+
+    instantiated = []
+
+    class ZeroArgToolkit:
+        def __init__(self):
+            instantiated.append(True)
+            self.functions = {}
+            self.async_functions = {}
+
+    engine = DiscussionEngine(_config(tools=[ToolConfig("pkg.ZeroArgToolkit")]))
+    with patch("discuss_agent.engine.import_from_path", return_value=ZeroArgToolkit):
+        engine._create_conversations()
+
+    assert instantiated == [True]
+
+
+def test_variadic_constructor_is_not_treated_as_context_aware():
+    from discuss_agent.engine import DiscussionEngine
+
+    received = []
+
+    class VariadicToolkit:
+        def __init__(self, **context):
+            received.append(context)
+            self.functions = {}
+            self.async_functions = {}
+
+    engine = DiscussionEngine(_config(tools=[ToolConfig("pkg.VariadicToolkit")]))
+    with patch("discuss_agent.engine.import_from_path", return_value=VariadicToolkit):
+        engine._create_conversations()
+
+    assert received == [{}]
+
+
+def test_positional_only_context_preserves_preceding_defaults():
+    from discuss_agent.engine import DiscussionEngine
+
+    received = []
+
+    class PositionalContextToolkit:
+        def __init__(self, label="default", context=None, /):
+            received.append((label, context))
+            self.functions = {}
+            self.async_functions = {}
+
+    config = _config(tools=[ToolConfig("pkg.PositionalContextToolkit")])
+    config.context = {"research_dirs": ["/tmp/research"]}
+    engine = DiscussionEngine(config)
+
+    with patch("discuss_agent.engine.import_from_path", return_value=PositionalContextToolkit):
+        engine._create_conversations()
+
+    assert received == [("default", config.context)]
+
+
+def test_internal_constructor_type_error_fails_strict_loading():
+    from discuss_agent.engine import DiscussionEngine
+
+    class BrokenContextToolkit:
+        def __init__(self, context):
+            raise TypeError("internal constructor type error")
+
+    config = _config(strict=True, tools=[ToolConfig("pkg.BrokenContextToolkit")])
+    config.context = {"research_dirs": ["/tmp/research"]}
+    engine = DiscussionEngine(config)
+
+    with patch("discuss_agent.engine.import_from_path", return_value=BrokenContextToolkit):
+        with pytest.raises(RuntimeError, match="internal constructor type error"):
+            engine._create_conversations()
+
+
 @patch("discuss_agent.engine.generate_usage_summary")
 @patch("discuss_agent.engine.AuditLogger")
 @patch("discuss_agent.engine.Archiver")
