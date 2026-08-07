@@ -432,6 +432,38 @@ def test_closed_reason_content_is_not_a_runtime_semantic_gate():
     assert mgr.claims["X"].status == "CLOSED:共识"
 
 
+def test_material_continue_false_cannot_coexist_with_room_converged():
+    from discuss_agent.claims import Claim, ClaimsManager
+    from discuss_agent.engine import DiscussionEngine
+
+    mgr = ClaimsManager()
+    mgr.claims["X"] = Claim("X", "OPEN")
+    engine = DiscussionEngine(_config())
+    engine._host_room_adjudication = {
+        "status": "CONVERGED",
+        "reason": "incorrectly claims completion",
+    }
+    verdict = {
+        "claim": "X",
+        "verdict": "CONTINUE",
+        "reason": "material current conflict remains",
+        "missing": "same-parameter arithmetic reconciliation",
+        "needs_agents": ["A"],
+        "allow_unknown_progress": False,
+    }
+
+    accepted, rejected = engine._apply_host_verdicts(
+        mgr, [verdict], {"X"}, round_num=2,
+    )
+
+    assert engine._room_converged(
+        mgr,
+        accepted=accepted,
+        rejected=rejected,
+        offered_keywords={"X"},
+    ) is False
+
+
 def test_same_round_indented_protocol_marker_warns_without_semantic_gate():
     from discuss_agent.claims import AgentOutput, ClaimsManager
     from discuss_agent.engine import DiscussionEngine

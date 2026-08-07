@@ -169,6 +169,18 @@ still enforces deterministic protocol, identity, and truncation gates. Legacy
 Host JSON arrays remain supported and retain the historical requirement that
 all claims be closed.
 
+Participants cannot modify a closed claim with ordinary `ACCEPT`, `REVISE`, or
+`REBUTTAL` markers. They must submit a strict request:
+
+```text
+[REOPEN_REQUEST TO:claim] {"kind":"HARD_FACT|MATERIAL_COUNTEREXAMPLE","fact":"...","source":"...","reason":"..."}
+```
+
+The runtime persists and deduplicates the request without judging materiality.
+On the next Host judgment, every pending request receives an `APPROVE` or
+`REJECT` decision. Approval restores the claim to `OPEN`; rejection keeps its
+closed status. Both outcomes remain in `claims.md` and the round audit.
+
 ## Configuration
 
 | Block | Field | Required | Default | Description |

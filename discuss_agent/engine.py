@@ -394,6 +394,12 @@ class DiscussionEngine:
         candidates = claims_mgr.get_host_candidates()
         if not candidates:
             return []
+        pending_reopens_by_keyword: dict[str, list] = {}
+        for request in claims_mgr.get_pending_reopen_requests():
+            pending_reopens_by_keyword.setdefault(
+                request.claim_keyword,
+                [],
+            ).append(request)
 
         host_max_tokens = self._host_model_config.max_tokens or 4096
         claim_batches = claims_mgr.format_host_candidate_batches(
@@ -428,6 +434,14 @@ class DiscussionEngine:
             expected_keywords = ClaimsManager.claim_keywords_from_formatted(
                 claims_text,
             )
+            expected_reopens = {
+                keyword_to_reference[keyword]: {
+                    request.request_id
+                    for request in requests
+                }
+                for keyword, requests in pending_reopens_by_keyword.items()
+                if keyword_to_reference.get(keyword) in expected_keywords
+            }
             truncated_references = (
                 ClaimsManager.truncated_claim_references_from_formatted(
                     claims_text,
@@ -484,6 +498,12 @@ class DiscussionEngine:
                 "区分礼貌附和、复述或未处理关键证据的表面回应，与真正处理观点、证据、"
                 "反驳、修订和条件的实质回应。判断再增加一轮的边际信息价值，"
                 "当记录已自然收敛或剩余分歧已被忠实封装时，不要机械续轮。\n"
+                "不同模型、范围或区间若有证据支持，可以作为平行模型共识，或以"
+                "CLOSED:分歧忠实封装；不得仅因它们没有共享一个中点、统一区间或"
+                "统一 master table 就强制 CONTINUE。比如依据与边界均已解释的"
+                "24-36、25-37、24-38，不应仅因数值不同而阻止收敛。"
+                "但同一模型、同一参数下出现可复现的算术冲突，仍可由当前计算消解，"
+                "必须 CONTINUE 并定向计算复核。Host 不得自行重算。\n"
                 "claim-level close 与 room-level convergence 相互独立："
                 "当有边界的 claim 自然稳定、继续讨论已无预期实质增量时，"
                 "可返回 CLOSED:共识 或 CLOSED:分歧。claim close 只表示停止继续讨论"
@@ -523,6 +543,12 @@ class DiscussionEngine:
                 "claim 真值、虚构事实、降低 materiality 或自动关闭 claim。\n"
                 "关键角色仅指其职责或已有证据对该 claim 真值有独特、不可替代影响的 Agent；"
                 "普通沉默不构成缺口。\n"
+                "对 CLOSED claim，普通 ACCEPT/REVISE/REBUTTAL 不得生效。只有运行时"
+                "持久化的 pending REOPEN_REQUEST 才可提交 Host。Host 必须对每个 "
+                "pending REOPEN_REQUEST 按其新硬事实或 material counterexample、source "
+                "和 reason 做语义 APPROVE/REJECT；runtime 不判断事实或反例的业务 "
+                "materiality。APPROVE 只把 claim 恢复为 OPEN 并进入后续正常上下文生命周期，"
+                "不得在同一裁决中再次关闭；REJECT 保持原 CLOSED 状态并保留审计。\n"
                 "若分歧仍可由当前可获得的事实、来源或计算消解，选择 CONTINUE；"
                 "只有无法再由事实、来源或计算消解、仅剩价值判断、先验或模型选择时，"
                 "才选择 CLOSED:分歧。\n"
@@ -564,6 +590,8 @@ class DiscussionEngine:
                 "或上下文截断导致无法判断时，必须 CONTINUE，不得假收敛。\n"
                 f"{final_instruction}"
                 f"可定向的 Agent：{bounded_agent_names}\n"
+                "Challenger 的质量按独立证据与推理评估，不得把工具调用次数作为质量、"
+                "准出或 Host/runtime 裁决标准；没有固定调用数。\n"
                 "本批每个 claim 必须且只能输出一次。不要输出 JSON 以外的文字；"
                 "对象不得缺字段或增加未知字段。\n"
                 "CLOSED JSON对象严格字段："
@@ -574,6 +602,12 @@ class DiscussionEngine:
                 '"missing":"字符串，可为空或描述外部/无人可补缺口",'
                 '"needs_agents":["零个或多个有效Agent名称"],'
                 '"allow_unknown_progress":false}\n'
+                "含 pending REOPEN_REQUEST 的 CLOSED claim 不使用上述 claim verdict；"
+                "其严格字段为："
+                '{"claim":"关键词","reopen_requests":['
+                '{"request_id":"运行时提供的精确ID","verdict":"APPROVE|REJECT",'
+                '"reason":"非空语义理由"}]}。reopen_requests 必须覆盖该 claim 的每个'
+                " pending request 恰好一次，不得增加未知字段。\n"
                 + (
                     "这是最后一个候选批次。输出严格 JSON 对象："
                     '{"room_adjudication":{"status":"CONVERGED|NOT_CONVERGED",'
@@ -644,6 +678,16 @@ class DiscussionEngine:
                     ):
                         schema_rejections: list[dict] = []
                         for item in parsed:
+                            reference = item.get("claim")
+                            if reference in expected_reopens:
+                                schema_rejections.extend(
+                                    self._reopen_schema_rejections(
+                                        item,
+                                        expected_reopens[reference],
+                                        attempt=attempt + 1,
+                                    )
+                                )
+                                continue
                             decision = item.get("verdict")
                             schema_reason = ""
                             if (
@@ -690,6 +734,23 @@ class DiscussionEngine:
                         for item in parsed:
                             reference = item["claim"]
                             if reference in truncated_references:
+                                if reference in expected_reopens:
+                                    self._host_protocol_rejections.append({
+                                        **item,
+                                        "host_reason": "",
+                                        "reason": (
+                                            "reopen request context truncated"
+                                        ),
+                                        "attempt": attempt + 1,
+                                    })
+                                    self._host_safety_blockers.add(
+                                        reference_to_keyword.get(
+                                            reference,
+                                            reference,
+                                        )
+                                    )
+                                    parsed = []
+                                    break
                                 keyword = reference_to_keyword.get(
                                     reference,
                                     reference,
@@ -713,7 +774,7 @@ class DiscussionEngine:
                                 reference,
                             )
                         verdicts.extend(parsed)
-                        if is_final_batch:
+                        if is_final_batch and parsed:
                             self._host_room_adjudication = room_adjudication
                         break
                     self._record_host_protocol_rejections(
@@ -729,6 +790,62 @@ class DiscussionEngine:
                     if attempt == 0:
                         continue
         return verdicts
+
+    @staticmethod
+    def _reopen_schema_rejections(
+        item: dict,
+        expected_request_ids: set[str],
+        *,
+        attempt: int,
+    ) -> list[dict]:
+        """Return strict schema and identity failures for one reopen decision."""
+        base = {
+            "claim": item.get("claim"),
+            "verdict": None,
+            "host_reason": "",
+            "attempt": attempt,
+        }
+        if set(item) != {"claim", "reopen_requests"} or type(
+            item.get("reopen_requests")
+        ) is not list:
+            return [{**base, "reason": "invalid reopen verdict schema"}]
+        rejections: list[dict] = []
+        seen: set[str] = set()
+        for decision in item["reopen_requests"]:
+            if (
+                not isinstance(decision, dict)
+                or set(decision) != {"request_id", "verdict", "reason"}
+                or type(decision.get("request_id")) is not str
+                or decision.get("verdict") not in {"APPROVE", "REJECT"}
+                or type(decision.get("reason")) is not str
+                or not decision["reason"].strip()
+            ):
+                rejections.append({
+                    **base,
+                    "reason": "invalid reopen verdict schema",
+                })
+                continue
+            request_id = decision["request_id"]
+            if request_id in seen:
+                rejections.append({
+                    **base,
+                    "request_id": request_id,
+                    "reason": "duplicate reopen request verdict",
+                })
+            elif request_id not in expected_request_ids:
+                rejections.append({
+                    **base,
+                    "request_id": request_id,
+                    "reason": "reopen request was not offered to the host",
+                })
+            seen.add(request_id)
+        for request_id in sorted(expected_request_ids - seen):
+            rejections.append({
+                **base,
+                "request_id": request_id,
+                "reason": "missing reopen request verdict",
+            })
+        return rejections
 
     def _record_host_attempt_rejection(
         self,
@@ -798,6 +915,55 @@ class DiscussionEngine:
         for item in verdicts:
             verdict = item if isinstance(item, dict) else {}
             keyword = verdict.get("claim", "")
+            if "reopen_requests" in verdict:
+                rejection_reason = ""
+                pending = {
+                    request.request_id: request
+                    for request in claims_mgr.get_pending_reopen_requests()
+                    if request.claim_keyword == keyword
+                }
+                if not isinstance(keyword, str):
+                    rejection_reason = "invalid claim field"
+                elif keyword in seen:
+                    rejection_reason = "duplicate verdict"
+                elif keyword not in offered_keywords:
+                    rejection_reason = "claim was not offered to the host"
+                elif (
+                    keyword not in claims_mgr.claims
+                    or not claims_mgr.claims[keyword].status.startswith(
+                        "CLOSED:"
+                    )
+                ):
+                    rejection_reason = "claim is not closed"
+                else:
+                    schema_rejections = self._reopen_schema_rejections(
+                        verdict,
+                        set(pending),
+                        attempt=0,
+                    )
+                    if schema_rejections:
+                        rejection_reason = schema_rejections[0]["reason"]
+                if rejection_reason:
+                    rejected.append({
+                        **verdict,
+                        "host_reason": "",
+                        "reason": rejection_reason,
+                    })
+                    continue
+                seen.add(keyword)
+                for decision in verdict["reopen_requests"]:
+                    approved = decision["verdict"] == "APPROVE"
+                    claims_mgr.resolve_reopen_request(
+                        decision["request_id"],
+                        approved=approved,
+                        reason=decision["reason"],
+                        round_num=round_num,
+                        persist=False,
+                    )
+                    if approved:
+                        self._host_safety_blockers.add(keyword)
+                accepted.append(verdict)
+                continue
             decision = verdict.get("verdict", "")
             reason = verdict.get("reason", "")
             rejection_reason = ""
@@ -877,15 +1043,17 @@ class DiscussionEngine:
                 "host_reason": "",
                 "reason": "missing verdict",
             })
-            claims_mgr.continue_claim(
-                keyword,
-                "Host裁决缺失或无效，保持 OPEN",
-                round_num,
-                needs_agents=fallback_agents,
-                missing=fallback_missing,
-                allow_unknown_progress=False,
-                persist=False,
-            )
+            claim = claims_mgr.claims.get(keyword)
+            if claim is not None and claim.status == "OPEN":
+                claims_mgr.continue_claim(
+                    keyword,
+                    "Host裁决缺失或无效，保持 OPEN",
+                    round_num,
+                    needs_agents=fallback_agents,
+                    missing=fallback_missing,
+                    allow_unknown_progress=False,
+                    persist=False,
+                )
 
         if accepted or missing_keywords:
             claims_mgr.save()
@@ -946,6 +1114,14 @@ class DiscussionEngine:
         if self._host_room_adjudication is None:
             return bool(claims_mgr.claims) and not claims_mgr.get_open_claims()
         if self._host_room_adjudication["status"] != "CONVERGED":
+            return False
+        if any(
+            verdict.get("verdict") == "CONTINUE"
+            and verdict.get("allow_unknown_progress") is False
+            for verdict in accepted
+        ):
+            return False
+        if claims_mgr.get_pending_reopen_requests():
             return False
         accepted_keywords = {
             verdict["claim"]

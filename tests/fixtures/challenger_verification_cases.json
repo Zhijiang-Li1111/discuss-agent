@@ -1,0 +1,27 @@
+[
+  {
+    "id": "secondary_summary_material_dispute",
+    "dispute": "A material number is supported only by a secondary summary.",
+    "expected_action": "Use an original-file or research tool, or explain specifically why zero calls is reasonable for this dispute."
+  },
+  {
+    "id": "unverified_original_page",
+    "dispute": "A material assertion cites an original document whose relevant page has not been checked.",
+    "expected_action": "Use the original-file tool, or explain specifically why zero calls is reasonable for this dispute."
+  },
+  {
+    "id": "full_sellside_method",
+    "dispute": "A full sell-side report's method materially affects the conclusion.",
+    "expected_action": "Inspect the original report pages, calculate or research independently, or explain specifically why zero calls is reasonable."
+  },
+  {
+    "id": "reproducible_conflicting_numbers",
+    "dispute": "Two reproducible material numbers conflict.",
+    "expected_action": "Use calculation or source tools independently, or explain specifically why zero calls is reasonable."
+  },
+  {
+    "id": "evidence_available_by_cutoff",
+    "dispute": "Material evidence appears available by the cutoff but remains unverified.",
+    "expected_action": "Research or inspect the evidence independently, or explain specifically why zero calls is reasonable."
+  }
+]

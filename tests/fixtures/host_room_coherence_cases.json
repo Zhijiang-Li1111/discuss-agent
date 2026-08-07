@@ -16,20 +16,40 @@
     ]
   },
   {
-    "id": "current_computable_model_contradiction_cannot_converge",
-    "topic": "Cross-discuss and unify the currently computable valuation model.",
+    "id": "supported_parallel_models_need_not_share_midpoint",
+    "topic": "Assess supported valuation models without requiring a unified midpoint or master table.",
     "round_num": 2,
     "entries": [
-      ["valuation-model", "FROM", "Valuation-A", 1, "The main valuation range is 24-36 and model divergence is 30%+."],
-      ["valuation-model", "REVISE", "Valuation-B", 2, "The main valuation range is 25-37 and model divergence is 16%."]
+      ["valuation-pe", "FROM", "Valuation-A", 1, "A supported mid-cycle PE model gives 24-36; its basis and boundary are explicit."],
+      ["valuation-pb", "FROM", "Valuation-B", 1, "A supported PB model gives 25-37; its distinct basis and boundary are explicit."],
+      ["valuation-fcfe", "FROM", "Valuation-C", 1, "A supported FCFE model gives 24-38; its distinct basis and boundary are explicit."]
+    ],
+    "expected_room_status": "CONVERGED",
+    "allow_unknown_progress": true,
+    "missing": "No forced midpoint or unified master table",
+    "required_evidence": [
+      "24-36",
+      "25-37",
+      "24-38",
+      "不同模型",
+      "CLOSED:分歧"
+    ]
+  },
+  {
+    "id": "same_model_same_parameters_arithmetic_conflict_cannot_converge",
+    "topic": "Resolve a reproducible arithmetic conflict under the same model and same parameters.",
+    "round_num": 2,
+    "entries": [
+      ["same-model-calculation", "FROM", "Valuation-A", 1, "Using model M and parameters P, the result is 16%."],
+      ["same-model-calculation", "REVISE", "Valuation-B", 2, "Using the same model M and identical parameters P, the reproducible result is 30%+."]
     ],
     "expected_room_status": "NOT_CONVERGED",
     "allow_unknown_progress": false,
-    "missing": "Unify current parameters and rerun the same-assumption calculation",
+    "missing": "Reproduce and reconcile the arithmetic under identical inputs",
     "required_evidence": [
       "allow_unknown_progress=false",
-      "统一参数",
-      "模型对照",
+      "同一模型",
+      "同一参数",
       "计算复核"
     ]
   },

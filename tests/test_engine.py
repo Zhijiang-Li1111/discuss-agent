@@ -89,6 +89,11 @@ def _room_coherence_cases() -> list[dict]:
     return json.loads(path.read_text())
 
 
+def _challenger_verification_cases() -> list[dict]:
+    path = Path(__file__).parent / "fixtures" / "challenger_verification_cases.json"
+    return json.loads(path.read_text())
+
+
 class TestDiscussionEngineIntegration:
     """Test 2 agents running 2 rounds with CLAIM state transitions."""
 
@@ -550,6 +555,100 @@ class TestOpenAIHostRouting:
 
         assert verdicts == [verdict]
         assert engine._host_room_adjudication == _room_judgment("CONVERGED")
+
+    async def test_host_judges_each_pending_reopen_request_with_strict_identity(self):
+        from discuss_agent.claims import Claim, ClaimsManager, ReopenRequest
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=2))
+        mgr = ClaimsManager()
+        mgr.topic = "topic"
+        mgr.claims["closed"] = Claim("closed", "CLOSED:共识")
+        first = ReopenRequest(
+            "reopen:first", "closed", "Agent-A", 2, "HARD_FACT",
+            "new filing", "filing.pdf p.1", "changes the conclusion",
+        )
+        second = ReopenRequest(
+            "reopen:second", "closed", "Agent-B", 2,
+            "MATERIAL_COUNTEREXAMPLE", "counterexample", "data.csv row 4",
+            "invalidates the prior boundary",
+        )
+        mgr.add_reopen_request(first)
+        mgr.add_reopen_request(second)
+        engine._call_host = AsyncMock(return_value=json.dumps({
+            "room_adjudication": _room_judgment("NOT_CONVERGED"),
+            "verdicts": [{
+                "claim": "closed",
+                "reopen_requests": [
+                    {
+                        "request_id": first.request_id,
+                        "verdict": "APPROVE",
+                        "reason": "The new filing changes a premise.",
+                    },
+                    {
+                        "request_id": second.request_id,
+                        "verdict": "REJECT",
+                        "reason": "The example is outside the claim boundary.",
+                    },
+                ],
+            }],
+        }))
+
+        verdicts = await engine._host_judge(mgr, round_num=2)
+        accepted, rejected = engine._apply_host_verdicts(
+            mgr, verdicts, {"closed"}, round_num=2,
+        )
+
+        assert rejected == []
+        assert accepted == verdicts
+        assert mgr.claims["closed"].status == "OPEN"
+        assert mgr.get_pending_reopen_requests() == []
+        assert engine._room_converged(
+            mgr,
+            accepted=accepted,
+            rejected=rejected,
+            offered_keywords={"closed"},
+        ) is False
+        prompt = engine._call_host.await_args.args[1]
+        assert "runtime 不判断事实或反例的业务 materiality" in prompt
+        assert "每个 pending REOPEN_REQUEST" in prompt
+
+    async def test_missing_reopen_request_decision_fails_closed_and_stays_pending(self):
+        from discuss_agent.claims import Claim, ClaimsManager, ReopenRequest
+        from discuss_agent.engine import DiscussionEngine
+
+        engine = DiscussionEngine(_make_config(num_agents=1))
+        mgr = ClaimsManager()
+        mgr.topic = "topic"
+        mgr.claims["closed"] = Claim("closed", "CLOSED:共识")
+        request = ReopenRequest(
+            "reopen:expected", "closed", "Agent-A", 2, "HARD_FACT",
+            "new fact", "source", "reason",
+        )
+        mgr.add_reopen_request(request)
+        engine._call_host = AsyncMock(return_value=json.dumps({
+            "room_adjudication": _room_judgment("CONVERGED"),
+            "verdicts": [{
+                "claim": "closed",
+                "reopen_requests": [{
+                    "request_id": "reopen:wrong",
+                    "verdict": "REJECT",
+                    "reason": "wrong identity",
+                }],
+            }],
+        }))
+
+        verdicts = await engine._host_judge(mgr, round_num=2)
+
+        assert verdicts == []
+        assert mgr.get_pending_reopen_requests() == [request]
+        assert engine._host_room_adjudication is None
+        assert {
+            item["reason"] for item in engine._host_protocol_rejections
+        } >= {
+            "reopen request was not offered to the host",
+            "missing reopen request verdict",
+        }
 
     async def test_explicit_completion_cannot_bypass_truncation_gate(self):
         from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
@@ -1035,6 +1134,37 @@ class TestOpenAIHostRouting:
         assert "忠实记录共识或分歧" in prompt
         assert "claim-level close 与 room-level convergence 相互独立" in prompt
         assert "room CONVERGED 仍可与 OPEN claims 共存" in prompt
+        assert "不得仅因它们没有共享一个中点" in prompt
+        assert "同一模型、同一参数" in prompt
+        assert "工具调用次数" in prompt
+        assert "没有固定调用数" in prompt
+
+    @pytest.mark.parametrize(
+        "case",
+        _challenger_verification_cases(),
+        ids=lambda case: case["id"],
+    )
+    def test_generic_challenger_prompt_requires_independent_verification(
+        self,
+        case,
+    ):
+        from discuss_agent.claims import Claim, ClaimEntry, ClaimsManager
+
+        mgr = ClaimsManager()
+        mgr.claims["dispute"] = Claim("dispute", "OPEN", [
+            ClaimEntry("FROM", "Analyst", 1, case["dispute"]),
+        ])
+
+        prompt = mgr.generate_update_prompt(
+            prev_round=1,
+            agent_name="Challenger",
+        )
+
+        assert "独立使用原文件、计算或研究工具核查" in prompt
+        assert "零调用合理" in prompt
+        assert "逐项明确说明理由" in prompt
+        assert "没有固定调用次数" in prompt
+        assert "不得以调用次数作为质量标准" in prompt
 
     @pytest.mark.parametrize(
         "case",

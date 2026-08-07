@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -15,6 +16,7 @@ from discuss_agent.claims import (
     ClaimEntry,
     ClaimsManager,
     ParsedResponse,
+    ReopenRequest,
     parse_agent_output,
 )
 
@@ -25,6 +27,27 @@ from discuss_agent.claims import (
 
 
 class TestParseAgentOutput:
+    def test_parse_reopen_request_with_strict_evidence_payload(self):
+        payload = {
+            "kind": "MATERIAL_COUNTEREXAMPLE",
+            "fact": "The original filing reports a conflicting denominator.",
+            "source": "filing.pdf p.12",
+            "reason": "This may reverse the closed per-share conclusion.",
+        }
+
+        results = parse_agent_output(
+            "[REOPEN_REQUEST TO:capital bridge] "
+            + json.dumps(payload)
+        )
+
+        assert results == [
+            ParsedResponse(
+                "REOPEN_REQUEST",
+                "capital bridge",
+                json.dumps(payload),
+            ),
+        ]
+
     def test_parse_new_claim(self):
         text = "[NEW_CLAIM:能繁去化进度] 当前能繁母猪3904万头，目标3650万"
         results = parse_agent_output(text)
@@ -108,6 +131,239 @@ class TestParseAgentOutput:
 
 
 class TestClaimsManagerMerge:
+    def test_reopen_request_to_closed_claim_is_pending_and_round_trips(
+        self, tmp_path,
+    ):
+        claims_file = str(tmp_path / "claims.md")
+        mgr = ClaimsManager(claims_file)
+        mgr.claims["X"] = Claim("X", "CLOSED:共识", [
+            ClaimEntry("FROM", "A", 1, "original"),
+            ClaimEntry("HOST", "HOST", 1, "裁决：closed"),
+        ])
+        payload = {
+            "kind": "HARD_FACT",
+            "fact": "A later available original page corrects the unit.",
+            "source": "original.pdf p.7",
+            "reason": "The corrected unit changes the bounded conclusion.",
+        }
+
+        mgr.merge_round([
+            AgentOutput(
+                "B", 2,
+                "[REOPEN_REQUEST TO:X] " + json.dumps(payload),
+            ),
+        ])
+
+        assert mgr.claims["X"].status == "CLOSED:共识"
+        pending = mgr.get_pending_reopen_requests()
+        assert len(pending) == 1
+        assert pending[0].claim_keyword == "X"
+        assert pending[0].agent_name == "B"
+        assert pending[0].kind == "HARD_FACT"
+        assert pending[0].fact == payload["fact"]
+        assert pending[0].source == payload["source"]
+        assert pending[0].reason == payload["reason"]
+        assert mgr.get_host_candidates() == [mgr.claims["X"]]
+
+        loaded = ClaimsManager(claims_file)
+        loaded.parse_claims_file()
+        assert loaded.get_pending_reopen_requests() == pending
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "not json",
+            json.dumps({"kind": "HARD_FACT", "fact": "x", "source": "s"}),
+            json.dumps({
+                "kind": "OPINION",
+                "fact": "x",
+                "source": "s",
+                "reason": "r",
+            }),
+            json.dumps({
+                "kind": "HARD_FACT",
+                "fact": "",
+                "source": "s",
+                "reason": "r",
+            }),
+            json.dumps({
+                "kind": "HARD_FACT",
+                "fact": "x",
+                "source": "s",
+                "reason": "r",
+                "extra": True,
+            }),
+        ],
+    )
+    def test_invalid_reopen_request_is_audited_without_mutation(self, payload):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "CLOSED:共识")
+
+        mgr.merge_round([
+            AgentOutput("B", 2, f"[REOPEN_REQUEST TO:X] {payload}"),
+        ])
+
+        assert mgr.claims["X"].entries == []
+        assert mgr.get_pending_reopen_requests() == []
+        assert mgr.unmatched_responses[-1]["response_type"] == (
+            "INVALID_REOPEN_REQUEST"
+        )
+
+    def test_reopen_request_requires_an_existing_closed_claim(self):
+        mgr = ClaimsManager()
+        mgr.claims["open"] = Claim("open", "OPEN")
+        payload = json.dumps({
+            "kind": "HARD_FACT",
+            "fact": "new filing",
+            "source": "filing.pdf p.1",
+            "reason": "changes result",
+        })
+
+        mgr.merge_round([
+            AgentOutput("B", 2, f"[REOPEN_REQUEST TO:open] {payload}"),
+            AgentOutput("B", 2, f"[REOPEN_REQUEST TO:missing] {payload}"),
+        ])
+
+        assert mgr.get_pending_reopen_requests() == []
+        assert [
+            item["response_type"] for item in mgr.unmatched_responses
+        ] == ["REOPEN_REQUEST", "REOPEN_REQUEST"]
+
+    def test_exact_reopen_request_is_persisted_exactly_once(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "CLOSED:共识")
+        raw = "[REOPEN_REQUEST TO:X] " + json.dumps({
+            "kind": "HARD_FACT",
+            "fact": "new filing",
+            "source": "filing.pdf p.1",
+            "reason": "changes result",
+        })
+        output = AgentOutput("B", 2, raw)
+
+        mgr.merge_round([output])
+        mgr.merge_round([output])
+
+        assert len(mgr.get_pending_reopen_requests()) == 1
+        assert mgr.unmatched_responses[-1]["response_type"] == (
+            "DUPLICATE_REOPEN_REQUEST"
+        )
+
+    def test_ordinary_response_to_closed_claim_remains_unmatched_with_reopen_pending(
+        self,
+    ):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "CLOSED:共识")
+        mgr.merge_round([
+            AgentOutput("B", 2, "[REOPEN_REQUEST TO:X] " + json.dumps({
+                "kind": "HARD_FACT",
+                "fact": "new filing",
+                "source": "filing.pdf p.1",
+                "reason": "changes result",
+            })),
+        ])
+
+        mgr.merge_round([
+            AgentOutput("C", 3, "[REBUTTAL TO:X] ordinary response"),
+            AgentOutput("C", 3, "[REVISE TO:X] ordinary revision"),
+            AgentOutput("C", 3, "[ACCEPT TO:X] ordinary accept"),
+        ])
+
+        assert mgr.claims["X"].status == "CLOSED:共识"
+        assert len(mgr.get_pending_reopen_requests()) == 1
+        assert [
+            item["response_type"] for item in mgr.unmatched_responses[-3:]
+        ] == ["REBUTTAL", "REVISE", "ACCEPT"]
+
+    def test_approved_reopen_restores_open_context_lifecycle(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "CLOSED:分歧")
+        request = ReopenRequest(
+            request_id="reopen:test",
+            claim_keyword="X",
+            agent_name="B",
+            round_num=2,
+            kind="MATERIAL_COUNTEREXAMPLE",
+            fact="Original data contradicts the closed boundary.",
+            source="original.csv row 8",
+            reason="The counterexample may reverse the conclusion.",
+        )
+        mgr.add_reopen_request(request)
+
+        mgr.resolve_reopen_request(
+            request.request_id,
+            approved=True,
+            reason="The sourced counterexample is material enough to re-examine.",
+            round_num=2,
+        )
+
+        assert mgr.claims["X"].status == "OPEN"
+        assert mgr.get_pending_reopen_requests() == []
+        prompt = mgr.generate_update_prompt(2, agent_name="A")
+        assert "## OPEN CLAIMS" in prompt
+        assert "Original data contradicts" in prompt
+        assert "REOPEN_APPROVED" in prompt
+
+    def test_approved_reopen_does_not_reuse_preclosure_continue_routing(self):
+        mgr = ClaimsManager()
+        mgr.claims["X"] = Claim("X", "OPEN", [
+            ClaimEntry("FROM", "A", 1, "original"),
+        ])
+        mgr.continue_claim(
+            "X",
+            "old gap",
+            1,
+            needs_agents=["B"],
+            missing="old missing item",
+            allow_unknown_progress=False,
+        )
+        mgr.close_claim("X", "共识", "later closed", round_num=2)
+        request = ReopenRequest(
+            "reopen:test", "X", "C", 3, "HARD_FACT",
+            "new fact", "source", "changes conclusion",
+        )
+        mgr.add_reopen_request(request)
+        mgr.resolve_reopen_request(
+            request.request_id,
+            approved=True,
+            reason="re-examine",
+            round_num=3,
+        )
+
+        prompt = mgr.generate_update_prompt(3, agent_name="B")
+
+        assert "## HOST定向请求" not in prompt
+        assert "## OPEN CLAIMS" in prompt
+        assert "old missing item" not in prompt
+
+    def test_rejected_reopen_stays_closed_with_durable_audit(self, tmp_path):
+        claims_file = str(tmp_path / "claims.md")
+        mgr = ClaimsManager(claims_file)
+        mgr.claims["X"] = Claim("X", "CLOSED:共识")
+        request = ReopenRequest(
+            request_id="reopen:test",
+            claim_keyword="X",
+            agent_name="B",
+            round_num=2,
+            kind="HARD_FACT",
+            fact="New number.",
+            source="source p.1",
+            reason="Could alter conclusion.",
+        )
+        mgr.add_reopen_request(request)
+
+        mgr.resolve_reopen_request(
+            request.request_id,
+            approved=False,
+            reason="The source repeats evidence already considered.",
+            round_num=2,
+        )
+
+        loaded = ClaimsManager(claims_file)
+        loaded.parse_claims_file()
+        assert loaded.claims["X"].status == "CLOSED:共识"
+        assert loaded.get_pending_reopen_requests() == []
+        assert "REOPEN_REJECTED" in loaded.claims["X"].entries[-1].content
+
     def test_merge_new_claims(self):
         mgr = ClaimsManager()
         outputs = [

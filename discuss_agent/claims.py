@@ -67,7 +67,12 @@ _UNMATCHED_HEADER = "##UNMATCHED_RESPONSES##"
 _NEEDS_AGENTS_PREFIX = "NEEDS_AGENTS："
 _MISSING_PREFIX = "MISSING："
 _ROUTING_PREFIX = "ROUTING_JSON："
-_CRITICAL_HISTORY_TYPES = ("REBUTTAL", "REVISE", "PARTIAL_ACCEPT")
+_CRITICAL_HISTORY_TYPES = (
+    "REBUTTAL",
+    "REVISE",
+    "PARTIAL_ACCEPT",
+    "REOPEN_REQUEST",
+)
 _STRUCTURED_RESPONSE_TYPES = ("REBUTTAL", "ACCEPT", "PARTIAL_ACCEPT", "REVISE")
 
 # Regex for parsing agent outputs
@@ -87,8 +92,12 @@ _REVISE_RE = re.compile(
 _NEW_CLAIM_RE = re.compile(
     rf"\[NEW_CLAIM:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
 )
+_REOPEN_REQUEST_RE = re.compile(
+    rf"\[REOPEN_REQUEST\s+TO:{_MARKER_TARGET}\]\s*(.*)", re.DOTALL,
+)
 _INDENTED_MARKER_RE = re.compile(
-    r"^[ \t]+\[(?:REBUTTAL TO|ACCEPT TO|PARTIAL_ACCEPT TO|REVISE TO|NEW_CLAIM):",
+    r"^[ \t]+\[(?:REBUTTAL TO|ACCEPT TO|PARTIAL_ACCEPT TO|REVISE TO|"
+    r"REOPEN_REQUEST TO|NEW_CLAIM):",
 )
 
 
@@ -101,6 +110,20 @@ class ParsedResponse:
     content: str
 
 
+@dataclass(frozen=True)
+class ReopenRequest:
+    """A participant request to semantically re-examine one closed claim."""
+
+    request_id: str
+    claim_keyword: str
+    agent_name: str
+    round_num: int
+    kind: str
+    fact: str
+    source: str
+    reason: str
+
+
 def parse_agent_output(text: str) -> list[ParsedResponse]:
     """Parse an agent's raw output into structured responses."""
     responses: list[ParsedResponse] = []
@@ -110,7 +133,8 @@ def parse_agent_output(text: str) -> list[ParsedResponse]:
         if not _INDENTED_MARKER_RE.match(line)
     )
     parts = re.split(
-        r"(?m)(?=^\[(?:REBUTTAL TO|ACCEPT TO|PARTIAL_ACCEPT TO|REVISE TO|NEW_CLAIM):)",
+        r"(?m)(?=^\[(?:REBUTTAL TO|ACCEPT TO|PARTIAL_ACCEPT TO|REVISE TO|"
+        r"REOPEN_REQUEST TO|NEW_CLAIM):)",
         text,
     )
     for part in parts:
@@ -134,6 +158,12 @@ def parse_agent_output(text: str) -> list[ParsedResponse]:
         m = _REVISE_RE.match(part)
         if m:
             responses.append(ParsedResponse("REVISE", m.group(1).strip(), m.group(2).strip()))
+            continue
+        m = _REOPEN_REQUEST_RE.match(part)
+        if m:
+            responses.append(ParsedResponse(
+                "REOPEN_REQUEST", m.group(1).strip(), m.group(2).strip(),
+            ))
             continue
         m = _NEW_CLAIM_RE.match(part)
         if m:
@@ -411,6 +441,8 @@ class ClaimsManager:
                         content=response.content,
                     ))
                     self.claims[response.target] = claim
+                elif response.response_type == "REOPEN_REQUEST":
+                    self._merge_reopen_request(output, response)
                 elif response.response_type in {
                     "REBUTTAL",
                     "ACCEPT",
@@ -460,6 +492,282 @@ class ClaimsManager:
         )
         self.save()
 
+    @staticmethod
+    def _parse_reopen_payload(content: str) -> dict[str, str] | None:
+        """Parse the strict evidence payload without judging its materiality."""
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        required = {"kind", "fact", "source", "reason"}
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != required
+            or payload.get("kind") not in {
+                "HARD_FACT",
+                "MATERIAL_COUNTEREXAMPLE",
+            }
+            or any(
+                type(payload[field]) is not str or not payload[field].strip()
+                for field in required
+            )
+        ):
+            return None
+        return {
+            field: payload[field].strip()
+            for field in ("kind", "fact", "source", "reason")
+        }
+
+    @staticmethod
+    def _reopen_request_id(
+        claim_keyword: str,
+        agent_name: str,
+        round_num: int,
+        payload: dict[str, str],
+    ) -> str:
+        identity = json.dumps(
+            {
+                "claim": claim_keyword,
+                "agent": agent_name,
+                "round": round_num,
+                **payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+        return f"reopen:{digest}"
+
+    def _merge_reopen_request(
+        self,
+        output: AgentOutput,
+        response: ParsedResponse,
+    ) -> None:
+        closed_targets = {
+            keyword
+            for keyword, claim in self.claims.items()
+            if claim.status.startswith("CLOSED:")
+        }
+        keyword_to_reference = self.build_host_references(
+            list(self.claims.values()),
+        )
+        reference_to_keyword = {
+            reference: keyword
+            for keyword, reference in keyword_to_reference.items()
+            if keyword in closed_targets
+        }
+        response_target = reference_to_keyword.get(
+            response.target,
+            response.target,
+        )
+        targets, unmatched = self._resolve_response_targets(
+            response_target,
+            closed_targets,
+        )
+        payload = self._parse_reopen_payload(response.content)
+        if payload is None:
+            self.unmatched_responses.append({
+                "agent_name": output.agent_name,
+                "round_num": output.round_num,
+                "response_type": "INVALID_REOPEN_REQUEST",
+                "target": response.target,
+                "content": response.content,
+            })
+            return
+        for target in targets:
+            request = ReopenRequest(
+                request_id=self._reopen_request_id(
+                    target,
+                    output.agent_name,
+                    output.round_num,
+                    payload,
+                ),
+                claim_keyword=target,
+                agent_name=output.agent_name,
+                round_num=output.round_num,
+                **payload,
+            )
+            if any(
+                existing.request_id == request.request_id
+                for existing in self.get_reopen_requests()
+            ):
+                self.unmatched_responses.append({
+                    "agent_name": output.agent_name,
+                    "round_num": output.round_num,
+                    "response_type": "DUPLICATE_REOPEN_REQUEST",
+                    "target": target,
+                    "content": response.content,
+                    "request_id": request.request_id,
+                })
+                continue
+            self.add_reopen_request(request, persist=False)
+        for target in unmatched:
+            self.unmatched_responses.append({
+                "agent_name": output.agent_name,
+                "round_num": output.round_num,
+                "response_type": "REOPEN_REQUEST",
+                "target": target,
+                "content": response.content,
+            })
+
+    @staticmethod
+    def _reopen_request_from_entry(
+        claim: Claim,
+        entry: ClaimEntry,
+    ) -> ReopenRequest | None:
+        if entry.entry_type != "REOPEN_REQUEST":
+            return None
+        try:
+            payload = json.loads(entry.content)
+        except json.JSONDecodeError:
+            return None
+        required = {"request_id", "kind", "fact", "source", "reason"}
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != required
+            or any(type(payload[field]) is not str for field in required)
+        ):
+            return None
+        return ReopenRequest(
+            request_id=payload["request_id"],
+            claim_keyword=claim.keyword,
+            agent_name=entry.agent_name,
+            round_num=entry.round_num,
+            kind=payload["kind"],
+            fact=payload["fact"],
+            source=payload["source"],
+            reason=payload["reason"],
+        )
+
+    @staticmethod
+    def _resolved_reopen_ids(claim: Claim) -> set[str]:
+        resolved: set[str] = set()
+        for entry in claim.entries:
+            if entry.entry_type != "HOST" or not entry.content.startswith(
+                ("REOPEN_APPROVED：", "REOPEN_REJECTED：")
+            ):
+                continue
+            _, _, encoded = entry.content.partition("：")
+            try:
+                payload = json.loads(encoded)
+            except json.JSONDecodeError:
+                continue
+            request_id = payload.get("request_id") if isinstance(payload, dict) else None
+            if isinstance(request_id, str):
+                resolved.add(request_id)
+        return resolved
+
+    @classmethod
+    def _pending_reopen_entry_ids(cls, claim: Claim) -> set[int]:
+        resolved = cls._resolved_reopen_ids(claim)
+        return {
+            id(entry)
+            for entry in claim.entries
+            if (
+                (request := cls._reopen_request_from_entry(claim, entry))
+                is not None
+                and request.request_id not in resolved
+            )
+        }
+
+    def get_reopen_requests(self) -> list[ReopenRequest]:
+        """Return every persisted reopen request in stable claim order."""
+        requests: list[ReopenRequest] = []
+        for claim in self.claims.values():
+            for entry in claim.entries:
+                request = self._reopen_request_from_entry(claim, entry)
+                if request is not None:
+                    requests.append(request)
+        return requests
+
+    def get_pending_reopen_requests(self) -> list[ReopenRequest]:
+        """Return requests that do not yet have a durable Host decision."""
+        pending: list[ReopenRequest] = []
+        for claim in self.claims.values():
+            resolved = self._resolved_reopen_ids(claim)
+            pending.extend(
+                request
+                for entry in claim.entries
+                if (
+                    (request := self._reopen_request_from_entry(claim, entry))
+                    is not None
+                    and request.request_id not in resolved
+                )
+            )
+        return pending
+
+    def add_reopen_request(
+        self,
+        request: ReopenRequest,
+        *,
+        persist: bool = True,
+    ) -> None:
+        """Persist a structurally valid request without changing claim status."""
+        claim = self.claims.get(request.claim_keyword)
+        if claim is None or not claim.status.startswith("CLOSED:"):
+            return
+        payload = {
+            "request_id": request.request_id,
+            "kind": request.kind,
+            "fact": request.fact,
+            "source": request.source,
+            "reason": request.reason,
+        }
+        claim.add_entry(ClaimEntry(
+            "REOPEN_REQUEST",
+            request.agent_name,
+            request.round_num,
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ))
+        self.current_round = max(self.current_round, request.round_num)
+        if persist:
+            self.save()
+
+    def resolve_reopen_request(
+        self,
+        request_id: str,
+        *,
+        approved: bool,
+        reason: str,
+        round_num: int,
+        persist: bool = True,
+    ) -> bool:
+        """Persist a Host decision and reopen only after semantic approval."""
+        request = next(
+            (
+                item for item in self.get_pending_reopen_requests()
+                if item.request_id == request_id
+            ),
+            None,
+        )
+        if request is None:
+            return False
+        claim = self.claims[request.claim_keyword]
+        decision = "REOPEN_APPROVED" if approved else "REOPEN_REJECTED"
+        claim.add_entry(ClaimEntry(
+            "HOST",
+            "HOST",
+            round_num,
+            decision + "：" + json.dumps(
+                {"request_id": request_id, "reason": reason},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ))
+        if approved:
+            claim.status = "OPEN"
+        self.current_round = max(self.current_round, round_num)
+        if persist:
+            self.save()
+        return True
+
     def get_open_claims(self) -> list[Claim]:
         """Return all claims with OPEN status."""
         return [c for c in self.claims.values() if c.status == "OPEN"]
@@ -473,8 +781,16 @@ class ClaimsManager:
         )
 
     def get_host_candidates(self) -> list[Claim]:
-        """Return every OPEN claim for semantic Host review."""
-        return self.get_open_claims()
+        """Return OPEN claims plus CLOSED claims with pending reopen requests."""
+        pending_keywords = {
+            request.claim_keyword
+            for request in self.get_pending_reopen_requests()
+        }
+        return [
+            claim
+            for claim in self.claims.values()
+            if claim.status == "OPEN" or claim.keyword in pending_keywords
+        ]
 
     def has_protocol_violation(self, keyword: str, round_num: int) -> bool:
         """Return whether this round contains a malformed marker for a claim."""
@@ -566,14 +882,15 @@ class ClaimsManager:
     @staticmethod
     def _host_routing(claim: Claim) -> dict[str, object]:
         """Read the latest persisted Host routing context for a claim."""
-        host_entry = next(
-            (
-                entry for entry in reversed(claim.entries)
-                if entry.entry_type == "HOST"
-                and entry.content.startswith("CONTINUE：")
-            ),
-            None,
-        )
+        host_entry = None
+        for entry in reversed(claim.entries):
+            if entry.entry_type != "HOST":
+                continue
+            if entry.content.startswith("CONTINUE："):
+                host_entry = entry
+            # A close/reopen decision starts a new lifecycle. Routing from the
+            # previous lifecycle must not leak into the reopened context.
+            break
         if host_entry is None:
             return {
                 "needs_agents": [],
@@ -653,6 +970,7 @@ class ClaimsManager:
                 for entry in claim.entries[-2:]
             ),
         }
+        selected_ids.update(cls._pending_reopen_entry_ids(claim))
         for entry_type in _CRITICAL_HISTORY_TYPES:
             response_rounds = [
                 entry.round_num
@@ -904,6 +1222,7 @@ class ClaimsManager:
         for index, (claim, prefix) in enumerate(zip(claims, prefixes)):
             content_limit = base_content_limit + (1 if index < extra else 0)
             critical_ids: set[int] = set()
+            critical_ids.update(self._pending_reopen_entry_ids(claim))
             for entry_type in _CRITICAL_HISTORY_TYPES:
                 response_rounds = [
                     entry.round_num
@@ -1329,10 +1648,21 @@ class ClaimsManager:
             "- [ACCEPT TO:关键词] 接受 + 理由\n"
             "- [PARTIAL_ACCEPT TO:关键词] 部分接受 + 接受边界/保留条件\n"
             "- [REVISE TO:关键词] 对现有 claim 提出修订文本 + 理由/证据\n"
+            "- CLOSED claim 不接受上述普通响应；只有发现新的硬事实或 material 反例时，"
+            "可用 [REOPEN_REQUEST TO:关键词] "
+            '{"kind":"HARD_FACT|MATERIAL_COUNTEREXAMPLE","fact":"新事实或反例",'
+            '"source":"可追溯来源","reason":"为何可能改变原裁决"} 请求重开。'
+            "runtime 只校验结构、身份和 exactly-once，不判断业务 materiality；"
+            "请求保持 pending，直到下一次 Host 语义 APPROVE/REJECT。\n"
             "- 每个响应 marker 只能写一个精确关键词，不得批量列出。\n"
             "- [NEW_CLAIM:关键词] 仅限新的实质主张、证据、反证或 UNKNOWN；不要为状态改名另开claim。\n"
             "- 证据不足时明确 UNKNOWN、缺什么、应由谁补证；不要把沉默当作同意。\n"
-            "可以随时用 research_search 或 web_search 搜索证据。"
+            "可以随时用 research_search 或 web_search 搜索证据。\n"
+            "若你的职责是 Challenger：对可验证且 material 的争议，凡涉及二级摘要、"
+            "尚未核对的原始页、完整卖方方法、可复现冲突数字，或截止日前可获得的证据，"
+            "应独立使用原文件、计算或研究工具核查；若对某一此类争议零调用合理，"
+            "必须逐项明确说明理由。没有固定调用次数，Host/runtime 也不得以调用次数"
+            "作为质量标准。"
         )
 
         return "\n".join(parts)
@@ -1365,7 +1695,14 @@ class ClaimsManager:
             "- 所有协议 marker 必须从 column 0 开始；缩进 marker 仅记录为协议 warning，不会执行。\n"
             "- [NEW_CLAIM:关键词] 你的论点和证据\n"
             "- 每个独立论点用一个 NEW_CLAIM 标记\n"
-            "- 可以随时用 research_search 或 web_search 搜索证据。"
+            "- REOPEN_REQUEST 仅用于后续轮次对 CLOSED claim 提交新的硬事实或 material "
+            "反例，并必须附可追溯 source 与可能改变原裁决的 reason。\n"
+            "- 可以随时用 research_search 或 web_search 搜索证据。\n"
+            "若你的职责是 Challenger：对可验证且 material 的争议，凡涉及二级摘要、"
+            "尚未核对的原始页、完整卖方方法、可复现冲突数字，或截止日前可获得的证据，"
+            "应独立使用原文件、计算或研究工具核查；若对某一此类争议零调用合理，"
+            "必须逐项明确说明理由。没有固定调用次数，Host/runtime 也不得以调用次数"
+            "作为质量标准。"
         )
         return "\n".join(parts)
 
