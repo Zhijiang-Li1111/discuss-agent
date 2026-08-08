@@ -61,7 +61,7 @@ tools:
   - trending
 
 context:
-  research_dir: "~/ima-downloads/"
+  research_dir: "~/research-data/"
 
 agents:
   - name: "热点猎手"
@@ -84,7 +84,7 @@ tools:
 context_builder: research_pipeline.context.build_research_context
 
 context:
-  research_dir: "~/ima-downloads/"
+  research_dir: "~/research-data/"
   published_file: "PUBLISHED.md"
   research_days: 2
 
@@ -150,7 +150,7 @@ def import_from_path(dotted_path: str):
 context_builder: research_pipeline.context.build_research_context
 
 context:
-  research_dir: "~/ima-downloads/"
+  research_dir: "~/research-data/"
 ```
 
 - `context_builder` 是顶层可选字段，独立于 `context` 块。这样 `context` 块永远是纯业务数据，不存在保留字冲突风险。
@@ -222,7 +222,7 @@ for ac in config.agents:
 - 移除导出：`PluginRegistry`、`load_plugins`
 - 新增导出：`ToolConfig`、`import_from_path`
 
-### 4.9 research-pipeline 变更（独立仓库 `/home/zhijiang/.openclaw/repos/research-pipeline/`）
+### 4.9 research-pipeline 变更（独立仓库）
 
 - `pyproject.toml`：移除 `[project.entry-points."discuss_agent.plugins"]` 部分
 - `research_pipeline/__init__.py`：删除 `register()` 函数（不再需要）
